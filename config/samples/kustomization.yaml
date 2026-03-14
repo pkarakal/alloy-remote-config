@@ -1,0 +1,9 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+
+## Append samples of your project ##
+resources:
+- fleet_v1alpha1_pipelineconfig.yaml
+- fleet_v1alpha1_collectorgroup.yaml
+- fleet_v1alpha1_collectorgroupbinding.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

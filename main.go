@@ -7,7 +7,7 @@ import (
 
 	"connectrpc.com/connect"
 	"connectrpc.com/grpcreflect"
-	"github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1"
+	collectorv1 "github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1"
 	"github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1/collectorv1connect"
 )
 

@@ -1,0 +1,32 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+
+# This rule is not used by the project alloy-remote-config itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants read-only access to fleet.pkarakal.com resources.
+# This role is intended for users who need visibility into these resources
+# without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: alloy-remote-config
+    app.kubernetes.io/managed-by: kustomize
+  name: collectorgroupbinding-viewer-role
+rules:
+- apiGroups:
+  - fleet.pkarakal.com
+  resources:
+  - collectorgroupbindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - fleet.pkarakal.com
+  resources:
+  - collectorgroupbindings/status
+  verbs:
+  - get
