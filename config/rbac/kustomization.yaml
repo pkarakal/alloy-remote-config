@@ -1,0 +1,37 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+
+resources:
+# All RBAC will be applied under this service account in
+# the deployment namespace. You may comment out this resource
+# if your manager will use a service account that exists at
+# runtime. Be sure to update RoleBinding and ClusterRoleBinding
+# subjects if changing service account names.
+- service_account.yaml
+- role.yaml
+- role_binding.yaml
+- leader_election_role.yaml
+- leader_election_role_binding.yaml
+# The following RBAC configurations are used to protect
+# the metrics endpoint with authn/authz. These configurations
+# ensure that only authorized users and service accounts
+# can access the metrics endpoint. Comment the following
+# permissions if you want to disable this protection.
+# More info: https://book.kubebuilder.io/reference/metrics.html
+- metrics_auth_role.yaml
+- metrics_auth_role_binding.yaml
+- metrics_reader_role.yaml
+# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
+# default, aiding admins in cluster management. Those roles are
+# not used by the alloy-remote-config itself. You can comment the following lines
+# if you do not want those helpers be installed with your Project.
+- collectorgroupbinding_admin_role.yaml
+- collectorgroupbinding_editor_role.yaml
+- collectorgroupbinding_viewer_role.yaml
+- collectorgroup_admin_role.yaml
+- collectorgroup_editor_role.yaml
+- collectorgroup_viewer_role.yaml
+- pipelineconfig_admin_role.yaml
+- pipelineconfig_editor_role.yaml
+- pipelineconfig_viewer_role.yaml
+

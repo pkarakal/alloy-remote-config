@@ -1,0 +1,40 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: alloy-remote-config
+    app.kubernetes.io/managed-by: kustomize
+  name: pipelineconfig-sample
+spec:
+  content: |
+    otelcol.receiver.otlp "default" {
+      http {}
+      grpc {}
+    
+      output {
+        metrics = [otelcol.processor.batch.default.input]
+        logs    = [otelcol.processor.batch.default.input]
+        traces  = [otelcol.processor.batch.default.input]
+      }
+    }
+  
+    otelcol.processor.batch "default" {
+      output {
+        metrics = [otelcol.exporter.otlphttp.default.input]
+        logs    = [otelcol.exporter.otlphttp.default.input]
+        traces  = [otelcol.exporter.otlphttp.default.input]
+      }
+    }
+    
+    otelcol.exporter.otlphttp "default" {
+      client {
+        endpoint = sys.env("<OTLP_ENDPOINT>")
+      }
+    }
+  description: |
+    This is a sample pipeline that receivers OTLP telemetry,
+    batches the samples and forwards them to an otlp http
+    exporter.
