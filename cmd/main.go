@@ -165,6 +165,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.CollectorGroupReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "CollectorGroup")
+		os.Exit(1)
+	}
+
+	if err := (&controller.PipelineConfigReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "PipelineConfig")
+		os.Exit(1)
+	}
+
 	if err := (&controller.CollectorGroupBindingReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

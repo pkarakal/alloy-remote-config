@@ -15,6 +15,7 @@ import (
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -33,6 +34,9 @@ var (
 	testEnv   *envtest.Environment
 	cfg       *rest.Config
 	k8sClient client.Client
+	// mgrClient is a cache-backed client with field indexes registered.
+	// Use it in tests that call functions relying on MatchingFields lookups.
+	mgrClient client.Client
 )
 
 func TestControllers(t *testing.T) {
@@ -68,9 +72,51 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
+	// Raw client — used by most tests for direct CRUD without cache lag.
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// Manager — provides a cache-backed client with field indexes registered.
+	// Used only by tests that need MatchingFields lookups (e.g. enqueue tests).
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme.Scheme})
+	Expect(err).NotTo(HaveOccurred())
+
+	indexer := mgr.GetFieldIndexer()
+	Expect(indexer.IndexField(ctx, &fleetv1alpha1.CollectorGroupBinding{}, IndexTenantRef,
+		func(obj client.Object) []string {
+			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
+			if b.Spec.TenantRef == "" {
+				return nil
+			}
+			return []string{b.Spec.TenantRef}
+		},
+	)).To(Succeed())
+	Expect(indexer.IndexField(ctx, &fleetv1alpha1.CollectorGroupBinding{}, IndexCollectorGroupRef,
+		func(obj client.Object) []string {
+			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
+			if b.Spec.CollectorGroupRef == "" {
+				return nil
+			}
+			return []string{b.Spec.CollectorGroupRef}
+		},
+	)).To(Succeed())
+	Expect(indexer.IndexField(ctx, &fleetv1alpha1.CollectorGroupBinding{}, IndexPipelineConfigRef,
+		func(obj client.Object) []string {
+			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
+			return []string{b.Spec.PipelineConfigRef}
+		},
+	)).To(Succeed())
+
+	mgrClient = mgr.GetClient()
+
+	go func() {
+		defer GinkgoRecover()
+		Expect(mgr.Start(ctx)).To(Succeed())
+	}()
+
+	// Wait for the cache to sync before tests that use mgrClient run.
+	Expect(mgr.GetCache().WaitForCacheSync(ctx)).To(BeTrue())
 })
 
 var _ = AfterSuite(func() {

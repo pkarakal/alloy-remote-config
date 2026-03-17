@@ -58,6 +58,16 @@ type CollectorGroupBindingStatus struct {
 	// version of the spec and the reconciler has not yet processed the
 	// latest changes.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// BoundPipelineConfigRef tracks the PipelineConfigRef used in the last
+	// successful reconcile. Used to detect ref changes for idempotent
+	// activeBindings counter management.
+	BoundPipelineConfigRef string `json:"boundPipelineConfigRef,omitempty"`
+
+	// BoundCollectorGroupRef tracks the CollectorGroupRef used in the last
+	// successful reconcile. Used to detect ref changes for idempotent
+	// activeBindings counter management.
+	BoundCollectorGroupRef string `json:"boundCollectorGroupRef,omitempty"`
 }
 
 type CollectorGroupBindingPhase string
@@ -75,6 +85,12 @@ const (
 	// either because a referenced resource does not exist or the
 	// operator failed to index it. See Conditions for details.
 	BindingPhaseDegraded CollectorGroupBindingPhase = "Degraded"
+)
+
+const (
+	// ConditionTypeRefsValid indicates both PipelineConfig and
+	// CollectorGroup/TenantRef resolve to existing resources.
+	ConditionTypeRefsValid = "RefsValid"
 )
 
 // +kubebuilder:object:root=true
