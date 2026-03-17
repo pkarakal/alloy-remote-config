@@ -85,6 +85,18 @@ spec:
           status:
             description: status defines the observed state of CollectorGroupBinding
             properties:
+              boundCollectorGroupRef:
+                description: |-
+                  BoundCollectorGroupRef tracks the CollectorGroupRef used in the last
+                  successful reconcile. Used to detect ref changes for idempotent
+                  activeBindings counter management.
+                type: string
+              boundPipelineConfigRef:
+                description: |-
+                  BoundPipelineConfigRef tracks the PipelineConfigRef used in the last
+                  successful reconcile. Used to detect ref changes for idempotent
+                  activeBindings counter management.
+                type: string
               conditions:
                 description: |-
                   Conditions contains the current observed conditions of this binding.
