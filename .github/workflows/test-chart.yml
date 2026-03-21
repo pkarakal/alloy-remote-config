@@ -1,0 +1,167 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+
+name: Chart CI
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+    paths:
+      - 'charts/**'
+      - 'ct.yaml'
+      - '.github/workflows/test-chart.yml'
+  pull_request:
+    paths:
+      - 'charts/**'
+      - 'ct.yaml'
+      - '.github/workflows/test-chart.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  lint-test:
+    name: Lint and install charts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up Python (required by chart-testing)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@v2.7.0
+
+      - name: List changed charts
+        id: list-changed
+        run: |
+          # ct list-changed compares against the target branch. On direct pushes
+          # to master the target branch IS master, so HEAD has no diff and no
+          # charts are reported changed. Use --all for push events so every
+          # chart is always validated on merge and tag. PRs still use the
+          # standard changed-only path.
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Push event — will run ct with --all"
+          else
+            changed=$(ct list-changed --config ct.yaml \
+              --target-branch "${{ github.event.repository.default_branch }}")
+            if [[ -n "$changed" ]]; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              echo "Changed charts: $changed"
+            else
+              echo "No chart changes detected — skipping lint and install"
+            fi
+          fi
+
+      - name: Lint charts
+        if: steps.list-changed.outputs.changed == 'true'
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            ct lint --all --config ct.yaml
+          else
+            ct lint --config ct.yaml
+          fi
+
+      - name: Set up Go (required to build the operator image)
+        if: steps.list-changed.outputs.changed == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build operator image
+        if: steps.list-changed.outputs.changed == 'true'
+        run: make docker-build IMG=controller:latest
+
+      - name: Create kind cluster
+        if: steps.list-changed.outputs.changed == 'true'
+        uses: helm/kind-action@v1.10.0
+
+      - name: Load operator image into kind
+        if: steps.list-changed.outputs.changed == 'true'
+        run: kind load docker-image controller:latest --name chart-testing
+
+      - name: Install charts and run helm tests
+        if: steps.list-changed.outputs.changed == 'true'
+        # ct install:
+        #   - installs the chart once per ci/*.yaml values file
+        #   - waits for all pods to be ready
+        #   - runs `helm test` (executes test-health pod) after each install
+        #   - cleans up before the next values file
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            ct install --all --config ct.yaml
+          else
+            ct install --config ct.yaml
+          fi
+
+  publish:
+    name: Publish to GHCR
+    runs-on: ubuntu-latest
+    needs: lint-test
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: Determine chart version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            BRANCH=$(git rev-parse --abbrev-ref HEAD | tr '/' '-')
+            VERSION="0.0.0-${BRANCH}-${SHORT_SHA}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved chart version: ${VERSION}"
+
+      - name: Login to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io \
+                --username "${{ github.repository_owner }}" \
+                --password-stdin
+
+      - name: Package chart
+        working-directory: charts/fleet-management
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          helm dependency build .
+          helm package . \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination .
+          echo "Packaged: $(ls ./*.tgz)"
+
+      - name: Push chart to GHCR
+        working-directory: charts/fleet-management
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          CHART_NAME=$(awk '/^name:/ {print $2; exit}' Chart.yaml)
+          TAR="${CHART_NAME}-${VERSION}.tgz"
+          echo "Pushing ${TAR} to oci://ghcr.io/pkarakal/charts"
+          helm push "${TAR}" oci://ghcr.io/pkarakal/charts
+
+      - name: Verify pushed chart
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Chart available at: oci://ghcr.io/pkarakal/charts/fleet-management:${VERSION}"

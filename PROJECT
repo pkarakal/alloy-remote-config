@@ -6,6 +6,10 @@ cliVersion: 4.13.0
 domain: pkarakal.com
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  helm.kubebuilder.io/v2-alpha:
+    manifests: dist/install.yaml
+    output: charts
 projectName: alloy-remote-config
 repo: github.com/pkarakal/alloy-remote-config
 resources:
