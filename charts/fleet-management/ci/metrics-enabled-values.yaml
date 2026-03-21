@@ -1,0 +1,13 @@
+# CI test values: same as default but with metrics enabled.
+# Exercises the metrics Service, RBAC, and manager args code paths.
+
+manager:
+  image:
+    repository: controller
+    tag: latest
+    pullPolicy: Never
+  args: []
+
+metrics:
+  enable: true
+  port: 8443

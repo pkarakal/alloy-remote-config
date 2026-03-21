@@ -1,0 +1,8 @@
+chart-dirs:
+  - charts
+excluded-charts: []
+target-branch: master
+helm-extra-args: "--timeout 120s"
+# Maintainers are listed in Chart.yaml; disable remote validation since
+# the maintainer URL points to a GitHub profile, not a resolvable email.
+validate-maintainers: false

@@ -1,0 +1,256 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nameOverride": {
+      "type": "string",
+      "description": "Partial override for the chart fullname template."
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "description": "Full override for the chart fullname template."
+    },
+    "podAnnotations": {
+      "type": "object",
+      "description": "Annotations to add to the controller manager Pod.",
+      "additionalProperties": { "type": "string" }
+    },
+    "podLabels": {
+      "type": "object",
+      "description": "Additional labels to add to the controller manager Pod.",
+      "additionalProperties": { "type": "string" }
+    },
+    "manager": {
+      "type": "object",
+      "required": ["image"],
+      "additionalProperties": false,
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of controller manager replicas."
+        },
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag"],
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Container image repository."
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Container image tag."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"],
+              "description": "Image pull policy."
+            }
+          }
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extra arguments passed to the manager binary."
+        },
+        "env": {
+          "type": "array",
+          "description": "Environment variables for the manager container (v1.EnvVar format).",
+          "items": { "type": "object" }
+        },
+        "envOverrides": {
+          "type": "object",
+          "description": "Simple key=value env overrides (take precedence over env).",
+          "additionalProperties": { "type": "string" }
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Image pull secrets for private registries."
+        },
+        "podSecurityContext": {
+          "type": "object",
+          "description": "Pod-level security context."
+        },
+        "securityContext": {
+          "type": "object",
+          "description": "Container-level security context."
+        },
+        "resources": {
+          "type": "object",
+          "description": "Resource requests and limits for the manager container."
+        },
+        "affinity": {
+          "type": "object",
+          "description": "Pod affinity rules."
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Node selector labels."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Pod tolerations."
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Topology spread constraints for distributing pods across zones or nodes."
+        },
+        "pdb": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "PodDisruptionBudget configuration.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Create a PodDisruptionBudget for the controller manager."
+            },
+            "minAvailable": {
+              "oneOf": [
+                { "type": "integer", "minimum": 0 },
+                { "type": "string", "pattern": "^[0-9]+%$" }
+              ],
+              "description": "Minimum number or percentage of pods that must remain available."
+            },
+            "maxUnavailable": {
+              "oneOf": [
+                { "type": "integer", "minimum": 0 },
+                { "type": "string", "pattern": "^[0-9]+%$" }
+              ],
+              "description": "Maximum number or percentage of pods that may be unavailable."
+            }
+          }
+        }
+      }
+    },
+    "rbacHelpers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Install admin/editor/viewer ClusterRoles for each CRD."
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Expose the /metrics endpoint and create the metrics RBAC resources."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Port the metrics server listens on."
+        }
+      }
+    },
+    "certManager": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Use cert-manager for TLS certificates (metrics endpoint and webhooks)."
+        }
+      }
+    },
+    "prometheus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Create a Prometheus ServiceMonitor (requires prometheus-operator)."
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Create a Service for the Connect-RPC API."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"],
+          "description": "Kubernetes Service type."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Service port for the Connect-RPC endpoint."
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Annotations to add to the Service resource."
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Create an Ingress for the Connect-RPC API."
+        },
+        "className": {
+          "type": "string",
+          "description": "Ingress class name (e.g. nginx, traefik)."
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Annotations to add to the Ingress resource."
+        },
+        "hosts": {
+          "type": "array",
+          "description": "Ingress host rules.",
+          "items": {
+            "type": "object",
+            "required": ["host", "paths"],
+            "properties": {
+              "host": { "type": "string" },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["path", "pathType"],
+                  "properties": {
+                    "path": { "type": "string" },
+                    "pathType": {
+                      "type": "string",
+                      "enum": ["Exact", "Prefix", "ImplementationSpecific"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tls": {
+          "type": "array",
+          "description": "TLS configuration for the Ingress.",
+          "items": { "type": "object" }
+        }
+      }
+    }
+  }
+}
