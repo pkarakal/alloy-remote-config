@@ -43,6 +43,7 @@ make run
 ```
 
 This runs the controller-manager in your terminal against whatever cluster your current `kubeconfig` context points to.
+The Connect-RPC API server starts on `:12345` alongside the controller-manager process.
 
 ### 5. Apply the sample resources
 
@@ -79,6 +80,47 @@ To verify the operator is running:
 kubectl logs -n alloy-remote-config-system \
   deployment/alloy-remote-config-controller-manager \
   -c manager -f
+```
+
+### Accessing the Connect-RPC API
+
+The Connect-RPC server is exposed on port `12345` of the controller-manager Pod. Create a `Service` or use
+`kubectl port-forward` to reach it locally:
+
+```bash
+kubectl port-forward -n alloy-remote-config-system \
+  deployment/alloy-remote-config-controller-manager 12345:12345
+```
+
+You can then query it with any Connect-compatible client, `grpcurl`, or plain HTTP:
+
+```bash
+# grpcurl (requires server reflection, enabled by default)
+grpcurl -plaintext localhost:12345 list
+
+# curl (Connect unary JSON)
+curl -X POST http://localhost:12345/collector.v1.CollectorService/GetConfig \
+  -H "Content-Type: application/json" \
+  -d '{"id": "my-collector", "attributes": {"tenant": "test-tenant", "collector_group": "production-collectors"}}'
+```
+
+### Changing the default bind address
+
+Pass `--connect-bind-address` to the manager to override the default `:12345`:
+
+```bash
+make run ARGS="--connect-bind-address=:9000"
+```
+
+In a deployed cluster, set the flag in `config/manager/manager.yaml`.
+
+### Metrics
+
+The operator metrics endpoint (`:8080/metrics` by default) exposes both controller-runtime metrics and the custom
+`alloy_remote_config_*` family. If you have the Prometheus Operator installed, apply the bundled `ServiceMonitor`:
+
+```bash
+kubectl apply -k config/prometheus/
 ```
 
 ## Development workflow
