@@ -12,6 +12,7 @@ import (
 	"github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1/collectorv1connect"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/port"
 )
 
@@ -20,22 +21,29 @@ var _ collectorv1connect.CollectorServiceHandler = (*CollectorService)(nil)
 // CollectorService implements the Connect-RPC CollectorServiceHandler by
 // delegating to storage-agnostic port interfaces.
 type CollectorService struct {
-	resolver  port.ConfigResolver
-	registry  port.CollectorRegistry
-	namespace string
+	resolver   port.ConfigResolver
+	registry   port.CollectorRegistry
+	namespace  string
+	rpcMetrics *metrics.RPCMetrics
 }
 
 // NewCollectorService creates a CollectorService wired to the given ports.
+// An optional *metrics.RPCMetrics can be provided to enable served/not-modified counters.
 func NewCollectorService(
 	resolver port.ConfigResolver,
 	registry port.CollectorRegistry,
 	namespace string,
+	rpcMetrics ...*metrics.RPCMetrics,
 ) *CollectorService {
-	return &CollectorService{
+	svc := &CollectorService{
 		resolver:  resolver,
 		registry:  registry,
 		namespace: namespace,
 	}
+	if len(rpcMetrics) > 0 {
+		svc.rpcMetrics = rpcMetrics[0]
+	}
+	return svc
 }
 
 func (s *CollectorService) GetConfig(
@@ -60,11 +68,17 @@ func (s *CollectorService) GetConfig(
 	}
 
 	if msg.GetHash() == resolved.ContentHash {
+		if s.rpcMetrics != nil {
+			s.rpcMetrics.NotModified.Inc()
+		}
 		return connect.NewResponse(&collectorv1.GetConfigResponse{
 			NotModified: true,
 		}), nil
 	}
 
+	if s.rpcMetrics != nil {
+		s.rpcMetrics.Served.Inc()
+	}
 	return connect.NewResponse(&collectorv1.GetConfigResponse{
 		Content: resolved.Content,
 		Hash:    resolved.ContentHash,
