@@ -13,6 +13,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"connectrpc.com/connect"
 	"connectrpc.com/grpcreflect"
 	"github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1/collectorv1connect"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,6 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -29,6 +31,8 @@ import (
 	kubernetesadapter "github.com/pkarakal/alloy-remote-config/internal/adapter/kubernetes"
 	"github.com/pkarakal/alloy-remote-config/internal/adapter/noop"
 	"github.com/pkarakal/alloy-remote-config/internal/controller"
+	"github.com/pkarakal/alloy-remote-config/internal/interceptor"
+	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/server"
 	"github.com/pkarakal/alloy-remote-config/internal/service"
 	// +kubebuilder:scaffold:imports
@@ -203,12 +207,27 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	resolver := kubernetesadapter.NewConfigResolver(mgr.GetClient())
+	rpcMetrics := metrics.NewRPCMetrics()
+	resMetrics := metrics.NewResolutionMetrics()
+	rc := metrics.NewResourceCollector(mgr.GetClient(), namespace)
+	buildInfo := metrics.NewBuildInfoMetric()
+	if err := metrics.Register(ctrlmetrics.Registry, rpcMetrics, resMetrics, rc, buildInfo); err != nil {
+		setupLog.Error(err, "Failed to register custom metrics")
+		os.Exit(1)
+	}
+	buildInfo.Set()
+
+	baseResolver := kubernetesadapter.NewConfigResolver(mgr.GetClient())
+	resolver := kubernetesadapter.NewMetricsConfigResolver(baseResolver, resMetrics)
 	registry := &noop.CollectorRegistry{}
-	collectorSvc := service.NewCollectorService(resolver, registry, namespace)
+	collectorSvc := service.NewCollectorService(resolver, registry, namespace, rpcMetrics)
 
 	mux := http.NewServeMux()
-	mux.Handle(collectorv1connect.NewCollectorServiceHandler(collectorSvc))
+	metricsInterceptor := interceptor.NewMetricsInterceptor(rpcMetrics)
+	mux.Handle(collectorv1connect.NewCollectorServiceHandler(
+		collectorSvc,
+		connect.WithInterceptors(metricsInterceptor),
+	))
 	reflector := grpcreflect.NewStaticReflector(collectorv1connect.CollectorServiceName)
 	mux.Handle(grpcreflect.NewHandlerV1(reflector))
 
