@@ -6,12 +6,15 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net/http"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"connectrpc.com/grpcreflect"
+	"github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1/collectorv1connect"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -23,7 +26,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	kubernetesadapter "github.com/pkarakal/alloy-remote-config/internal/adapter/kubernetes"
+	"github.com/pkarakal/alloy-remote-config/internal/adapter/noop"
 	"github.com/pkarakal/alloy-remote-config/internal/controller"
+	"github.com/pkarakal/alloy-remote-config/internal/server"
+	"github.com/pkarakal/alloy-remote-config/internal/service"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -41,6 +48,8 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	var connectAddr string
+	var namespace string
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
@@ -66,6 +75,10 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&connectAddr, "connect-bind-address", ":12345",
+		"The address the Connect-RPC server binds to.")
+	flag.StringVar(&namespace, "namespace", detectNamespace(),
+		"The namespace to resolve pipeline configurations in.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -190,6 +203,21 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
+	resolver := kubernetesadapter.NewConfigResolver(mgr.GetClient())
+	registry := &noop.CollectorRegistry{}
+	collectorSvc := service.NewCollectorService(resolver, registry, namespace)
+
+	mux := http.NewServeMux()
+	mux.Handle(collectorv1connect.NewCollectorServiceHandler(collectorSvc))
+	reflector := grpcreflect.NewStaticReflector(collectorv1connect.CollectorServiceName)
+	mux.Handle(grpcreflect.NewHandlerV1(reflector))
+
+	connectServer := server.NewConnectServer(mux, connectAddr)
+	if err := mgr.Add(connectServer); err != nil {
+		setupLog.Error(err, "Failed to add Connect-RPC server to manager")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")
 		os.Exit(1)
@@ -204,4 +232,12 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// detectNamespace returns the in-cluster namespace if available, otherwise "default".
+func detectNamespace() string {
+	if ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		return string(ns)
+	}
+	return "default"
 }
