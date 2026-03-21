@@ -27,6 +27,7 @@ When a collector polls for its config, resolution is first-match in priority ord
 
 1. Exact `tenantRef` match: a binding targeting this specific collector
 2. Exact `collectorGroupRef` match: a binding targeting the collector's group
+3. Default fallback: a `PipelineConfig` named `default` in the watched namespace
 
 ---
 
@@ -56,13 +57,27 @@ When a collector polls for its config, resolution is first-match in priority ord
 │  │  .spec.tenantRef                        │            │
 │  │  .spec.collectorGroupRef                │            │
 │  │  .spec.pipelineConfigRef                │            │
-│  └─────────────────────────────────────────┘            │
+│  └──────────────────┬──────────────────────┘            │
+│                     │ O(1) MatchingFields               │
+│                     ▼                                   │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │         Connect-RPC API Server (:12345)          │   │
+│  │  CollectorService                                │   │
+│  │   GetConfig / RegisterCollector /                │   │
+│  │   UnregisterCollector                            │   │
+│  └──────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
+          ▲
+          │ remotecfg polling
+          │
+┌─────────┴───────────┐
+│   Alloy Collectors  │
+└─────────────────────┘
 ```
 
-The `CollectorGroupBinding` controller registers three field indexes on the informer cache at startup. These allow the
-remote-config API server (not yet implemented) to resolve which `PipelineConfig` to serve for a given collector via an
-O(1) `MatchingFields` lookup — no separate in-memory store needed.
+The `CollectorGroupBinding` controller registers three field indexes on the informer cache at startup. The Connect-RPC
+API server uses these indexes for O(1) `MatchingFields` lookups when resolving which `PipelineConfig` to serve — no
+separate in-memory store needed.
 
 ---
 
@@ -165,19 +180,107 @@ spec:
 
 ---
 
+## Remote-config API
+
+The operator embeds a [Connect-RPC](https://connectrpc.com/) server that implements the
+[Grafana Alloy remote config API](https://github.com/grafana/alloy-remote-config). Alloy collectors configure a
+`remotecfg` block pointing at this server; the server then resolves and returns the correct `PipelineConfig` content.
+
+The server listens on `:12345` by default (configurable via `--connect-bind-address`).
+
+### RPC methods
+
+| Method                | Description                                                           |
+|-----------------------|-----------------------------------------------------------------------|
+| `GetConfig`           | Returns the pipeline config for a collector, with hash-based caching  |
+| `RegisterCollector`   | Records a collector's presence (no-op registry by default)            |
+| `UnregisterCollector` | Removes a collector record (no-op registry by default)                |
+
+`GetConfig` accepts a `hash` field. If the collector's cached hash matches the current config hash, the server returns
+`notModified: true` and omits the config body as that Alloy server already has the configuration body.
+
+### Configuring Alloy
+
+Add a `remotecfg` block to your Alloy configuration pointing at the operator's Connect-RPC address:
+
+```alloy
+remotecfg {
+  url = "http://alloy-remote-config-server.<namespace>.svc.cluster.local:12345"
+
+  // Identifies this collector for tenant-specific bindings
+  id = constants.hostname
+
+  // Assign the collector to a group for group-wide bindings
+  attributes {
+    "tenant" = "tenant"
+    "collector_group" = "production"
+  }
+
+  poll_interval = "1m"
+}
+```
+
+The `tenant` attribute maps to `tenantRef` lookups; the `collector_group` attribute maps to `collectorGroupRef` lookups.
+
+---
+
+## Observability
+
+The operator exposes Prometheus metrics under the `alloy_remote_config` namespace.
+
+### RPC metrics
+
+| Metric                                             | Type      | Labels              | Description                                    |
+|----------------------------------------------------|-----------|---------------------|------------------------------------------------|
+| `alloy_remote_config_rpc_requests_total`           | Counter   | `procedure`, `code` | Total RPC requests by procedure and status     |
+| `alloy_remote_config_rpc_request_duration_seconds` | Histogram | `procedure`         | RPC request latency                            |
+| `alloy_remote_config_config_served_total`          | Counter   | —                   | GetConfig calls returning a fresh config body  |
+| `alloy_remote_config_config_not_modified_total`    | Counter   | —                   | GetConfig calls returning notModified          |
+
+### Resolution metrics
+
+| Metric                                                    | Type      | Labels            | Description                                   |
+|-----------------------------------------------------------|-----------|-------------------|-----------------------------------------------|
+| `alloy_remote_config_config_resolution_total`             | Counter   | `path`, `outcome` | Resolution attempts per lookup step           |
+| `alloy_remote_config_config_resolution_duration_seconds`  | Histogram | `path`            | Informer cache lookup latency per step        |
+
+`path` is one of `tenant`, `collectorgroup`, or `default`.
+
+### Resource metrics
+
+| Metric                                           | Type  | Labels                   | Description                                        |
+|--------------------------------------------------|-------|--------------------------|----------------------------------------------------|
+| `alloy_remote_config_pipeline_configs`           | Gauge | `validity`               | PipelineConfig count by validity                   |
+| `alloy_remote_config_collector_group_bindings`   | Gauge | `phase`                  | CollectorGroupBinding count by phase               |
+| `alloy_remote_config_collector_groups`           | Gauge | —                        | Total CollectorGroup count                         |
+| `alloy_remote_config_deletion_blocked_resources` | Gauge | `kind`                   | Resources blocked from deletion by active bindings |
+| `alloy_remote_config_build_info`                 | Gauge | `version`, `goversion`   | Build metadata (value always 1)                    |
+
+A `ServiceMonitor` manifest is included at `config/prometheus/` for Prometheus Operator-based scraping.
+
+---
+
 ## Project layout
 
 ```
 .
 ├── api/v1alpha1/               # CRD type definitions and generated DeepCopy methods
-├── cmd/main.go                 # Operator entry point (controller-manager)
-├── main.go                     # Remote-config API server entry point (work in progress)
+├── cmd/main.go                 # Entry point: controller-manager + Connect-RPC server
 ├── internal/
-│   └── controller/             # Reconciliation logic for each CRD
+│   ├── controller/             # Reconciliation logic for each CRD
+│   ├── service/                # Connect-RPC CollectorService implementation
+│   ├── server/                 # HTTP server wrapping Connect-RPC (manager.Runnable)
+│   ├── adapter/
+│   │   ├── kubernetes/         # Informer-cache-backed ConfigResolver
+│   │   └── noop/               # No-op CollectorRegistry
+│   ├── port/                   # ConfigResolver and CollectorRegistry interfaces
+│   ├── metrics/                # Prometheus metric definitions and resource collector
+│   └── interceptor/            # Connect-RPC metrics interceptor
 ├── config/
 │   ├── crd/bases/              # Generated CRD manifests (do not edit)
 │   ├── rbac/                   # Generated RBAC manifests (do not edit)
 │   ├── manager/                # Operator Deployment manifests
+│   ├── prometheus/             # ServiceMonitor for Prometheus Operator
 │   └── samples/                # Example CRs
 └── test/
     └── e2e/                    # End-to-end tests
