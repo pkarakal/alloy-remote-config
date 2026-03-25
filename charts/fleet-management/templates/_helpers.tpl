@@ -1,4 +1,18 @@
 {{/*
+Resolve the full image reference (registry/repository:tag) for a given image config.
+Resolution order: global.imageRegistry > image.registry > (no prefix).
+Call with: include "fleet-management.image" (dict "global" .Values.global "image" .Values.<component>.image)
+*/}}
+{{- define "fleet-management.image" -}}
+{{- $registry := .global.imageRegistry | default .image.registry -}}
+{{- if $registry -}}
+{{- printf "%s/%s:%s" $registry .image.repository .image.tag -}}
+{{- else -}}
+{{- printf "%s:%s" .image.repository .image.tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Expand the name of the chart.
 */}}
 {{- define "fleet-management.name" -}}
@@ -69,4 +83,36 @@ Deployments (selectors are immutable).
 {{- define "fleet-management.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "fleet-management.name" . }}
 control-plane: controller-manager
+{{- end }}
+
+{{/*
+Selector labels for the Envoy gateway Deployment and Service.
+Uses app.kubernetes.io/component: gateway to avoid conflicting with the manager's
+control-plane: controller-manager selector.
+*/}}
+{{- define "fleet-management.gatewaySelectorLabels" -}}
+app.kubernetes.io/name: {{ include "fleet-management.name" . }}
+app.kubernetes.io/component: gateway
+{{- end }}
+
+{{/*
+Fully-qualified DNS name of the internal Connect-RPC API Service.
+Used as the Envoy upstream cluster address so the gateway can proxy to the API.
+*/}}
+{{- define "fleet-management.gatewayUpstreamHost" -}}
+{{- include "fleet-management.resourceName" (dict "suffix" "api" "context" .) }}.{{ .Release.Namespace }}.svc.cluster.local
+{{- end }}
+
+{{/*
+Compute the final Envoy bootstrap config by:
+  1. Rendering gateway.config (a templated YAML string) with tpl
+  2. Parsing the result with fromYaml
+  3. Deep-merging gateway.structuredConfig on top (structuredConfig wins)
+  4. Converting back to YAML
+  5. Running tpl a second time to resolve any template functions in the merged output
+This mirrors Loki's loki.calculatedConfig pattern and allows users to either tweak
+individual Envoy fields via structuredConfig or replace the entire config via gateway.config.
+*/}}
+{{- define "fleet-management.gatewayCalculatedConfig" -}}
+{{ tpl (mergeOverwrite (tpl .Values.gateway.config . | fromYaml) .Values.gateway.structuredConfig | toYaml) . }}
 {{- end }}

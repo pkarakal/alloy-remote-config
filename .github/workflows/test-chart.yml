@@ -83,7 +83,7 @@ jobs:
 
       - name: Build operator image
         if: steps.list-changed.outputs.changed == 'true'
-        run: make docker-build IMG=controller:latest
+        run: make docker-build IMG=ghcr.io/pkarakal/alloy-remote-config:latest
 
       - name: Create kind cluster
         if: steps.list-changed.outputs.changed == 'true'
@@ -91,7 +91,19 @@ jobs:
 
       - name: Load operator image into kind
         if: steps.list-changed.outputs.changed == 'true'
-        run: kind load docker-image controller:latest --name chart-testing
+        run: kind load docker-image ghcr.io/pkarakal/alloy-remote-config:latest --name chart-testing
+
+      - name: Pull and load Envoy gateway image into kind
+        if: steps.list-changed.outputs.changed == 'true'
+        run: |
+          docker pull envoyproxy/envoy:distroless-v1.37.1
+          kind load docker-image envoyproxy/envoy:distroless-v1.37.1 --name chart-testing
+
+      - name: Pull and load kubectl image into kind (used by pre-delete hook)
+        if: steps.list-changed.outputs.changed == 'true'
+        run: |
+          docker pull bitnami/kubectl:latest
+          kind load docker-image bitnami/kubectl:latest --name chart-testing
 
       - name: Install charts and run helm tests
         if: steps.list-changed.outputs.changed == 'true'

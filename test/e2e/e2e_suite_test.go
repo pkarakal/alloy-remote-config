@@ -21,6 +21,8 @@ import (
 var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "example.com/alloy-remote-config:v0.0.1"
+	// gatewayImage is the Envoy gateway image to be pre-loaded into Kind when gateway tests are enabled.
+	gatewayImage = "envoyproxy/envoy:distroless-v1.37.1"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -29,6 +31,7 @@ var (
 // The default setup requires Kind and CertManager.
 //
 // To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+// To enable gateway (Envoy) image pre-loading into Kind, set: GATEWAY_ENABLED=true
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting alloy-remote-config e2e test suite\n")
@@ -48,6 +51,7 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
 	setupCertManager()
+	setupGateway()
 })
 
 var _ = AfterSuite(func() {
@@ -73,6 +77,24 @@ func setupCertManager() {
 
 	By("installing CertManager")
 	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
+}
+
+// setupGateway pulls the Envoy gateway image and loads it into the Kind cluster.
+// Skips loading if GATEWAY_ENABLED is not set to "true".
+func setupGateway() {
+	if os.Getenv("GATEWAY_ENABLED") != "true" {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping gateway image pre-load (GATEWAY_ENABLED != true)\n")
+		return
+	}
+
+	By("pulling the gateway (Envoy) image")
+	cmd := exec.Command("docker", "pull", gatewayImage)
+	_, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to pull the gateway image")
+
+	By("loading the gateway image on Kind")
+	err = utils.LoadImageToKindClusterWithName(gatewayImage)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the gateway image into Kind")
 }
 
 // teardownCertManager uninstalls CertManager if it was installed by setupCertManager.
