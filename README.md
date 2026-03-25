@@ -27,7 +27,7 @@ When a collector polls for its config, resolution is first-match in priority ord
 
 1. Exact `tenantRef` match: a binding targeting this specific collector
 2. Exact `collectorGroupRef` match: a binding targeting the collector's group
-3. Default fallback: a `PipelineConfig` named `default` in the watched namespace
+3. Default fallback: a `PipelineConfig` labelled `fleet.pkarakal.com/default-pipeline-config: "true"` in the watched namespace
 
 ---
 
@@ -171,12 +171,13 @@ spec:
 
 **Status fields:**
 
-| Field          | Description                                                 |
-|----------------|-------------------------------------------------------------|
-| `phase`        | `Pending`, `Active`, or `Degraded`                          |
-| `configHash`   | Hash of the `PipelineConfig` content currently being served |
-| `lastSyncedAt` | Time of the last successful reconcile                       |
-| `conditions`   | `RefsValid` — whether all referenced resources exist        |
+| Field               | Description                                                                                                                                                                                                                                                                      |
+|---------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `phase`             | `Pending`, `Active`, or `Degraded`                                                                                                                                                                                                                                               |
+| `configHash`        | Hash of the `PipelineConfig` content currently being served                                                                                                                                                                                                                      |
+| `lastSyncedAt`      | Time of the last successful reconcile                                                                                                                                                                                                                                            |
+| `conditions`        | `RefsValid` — whether all referenced resources exist                                                                                                                                                                                                                             |
+| `registeredTenants` | List of tenants currently registered to this binding. Each entry contains the tenant `id`, the collector instance `collectorId`, and a `lastSeenAt` timestamp. Entries are upserted on `RegisterCollector` and evicted after the collector TTL window elapses without a refresh. |
 
 ---
 
@@ -190,11 +191,11 @@ The server listens on `:12345` by default (configurable via `--connect-bind-addr
 
 ### RPC methods
 
-| Method                | Description                                                           |
-|-----------------------|-----------------------------------------------------------------------|
-| `GetConfig`           | Returns the pipeline config for a collector, with hash-based caching  |
-| `RegisterCollector`   | Records a collector's presence (no-op registry by default)            |
-| `UnregisterCollector` | Removes a collector record (no-op registry by default)                |
+| Method                | Description                                                                                       |
+|-----------------------|---------------------------------------------------------------------------------------------------|
+| `GetConfig`           | Returns the pipeline config for a collector, with hash-based caching                              |
+| `RegisterCollector`   | Upserts the collector's tenant into the matching `CollectorGroupBinding.status.registeredTenants` |
+| `UnregisterCollector` | Removes the collector's tenant entry from its binding's `registeredTenants`                       |
 
 `GetConfig` accepts a `hash` field. If the collector's cached hash matches the current config hash, the server returns
 `notModified: true` and omits the config body as that Alloy server already has the configuration body.
@@ -221,6 +222,39 @@ remotecfg {
 ```
 
 The `tenant` attribute maps to `tenantRef` lookups; the `collector_group` attribute maps to `collectorGroupRef` lookups.
+
+### Collector registration
+
+When a collector calls `RegisterCollector`, the operator upserts it into `status.registeredTenants` of the matching
+`CollectorGroupBinding`. This provides a live view of which tenants are active and what config they are receiving:
+
+```bash
+# See all registered tenants for a binding
+kubectl get collectorgroupbinding production-binding \
+  -o jsonpath='{.status.registeredTenants}' | jq .
+
+# [
+#   { "id": "acme", "collectorId": "alloy-prod-1", "lastSeenAt": "2026-03-25T10:00:00Z" },
+#   { "id": "contoso", "collectorId": "alloy-prod-2", "lastSeenAt": "2026-03-25T10:01:00Z" }
+# ]
+```
+
+Entries are evicted by the `CollectorGroupBinding` reconciler after the collector TTL window elapses without a refresh
+(default: `5m`, configurable via `--collector-ttl`). Setting `--collector-ttl=0` disables eviction entirely.
+
+### Default PipelineConfig
+
+The default fallback config is discovered by label, not by name. Apply the well-known label to any `PipelineConfig` to
+make it the default:
+
+```yaml
+metadata:
+  labels:
+    fleet.pkarakal.com/default-pipeline-config: "true"
+```
+
+The Helm chart creates a labelled default `PipelineConfig`, `CollectorGroup`, and `CollectorGroupBinding` out of the box
+(see `values.defaults`). If multiple resources carry the label, the first match is used and a warning is logged.
 
 ---
 
@@ -271,8 +305,8 @@ A `ServiceMonitor` manifest is included at `config/prometheus/` for Prometheus O
 │   ├── service/                # Connect-RPC CollectorService implementation
 │   ├── server/                 # HTTP server wrapping Connect-RPC (manager.Runnable)
 │   ├── adapter/
-│   │   ├── kubernetes/         # Informer-cache-backed ConfigResolver
-│   │   └── noop/               # No-op CollectorRegistry
+│   │   ├── kubernetes/         # Informer-cache-backed ConfigResolver and KubernetesCollectorRegistry
+│   │   └── noop/               # No-op CollectorRegistry (kept for testing)
 │   ├── port/                   # ConfigResolver and CollectorRegistry interfaces
 │   ├── metrics/                # Prometheus metric definitions and resource collector
 │   └── interceptor/            # Connect-RPC metrics interceptor
