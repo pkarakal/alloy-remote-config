@@ -36,11 +36,12 @@ var _ = Describe("ConfigResolver", func() {
 		}
 	}
 
-	createPipelineConfig := func(name, content string) {
+	createPipelineConfig := func(name, content string, labels map[string]string) {
 		pc := &fleetv1alpha1.PipelineConfig{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: namespace,
+				Labels:    labels,
 			},
 			Spec: fleetv1alpha1.PipelineConfigSpec{
 				Content: content,
@@ -74,7 +75,7 @@ var _ = Describe("ConfigResolver", func() {
 		})
 
 		It("should resolve config for a matching tenant binding", func() {
-			createPipelineConfig("tenant-pc", "tenant pipeline content")
+			createPipelineConfig("tenant-pc", "tenant pipeline content", nil)
 			createBinding("tenant-binding", "my-tenant", "", "tenant-pc")
 
 			resolver := NewConfigResolver(mgrClient)
@@ -99,7 +100,7 @@ var _ = Describe("ConfigResolver", func() {
 		})
 
 		It("should resolve config for a matching collector group binding", func() {
-			createPipelineConfig("group-pc", "group pipeline content")
+			createPipelineConfig("group-pc", "group pipeline content", nil)
 			createBinding("group-binding", "", "my-group", "group-pc")
 
 			resolver := NewConfigResolver(mgrClient)
@@ -122,8 +123,9 @@ var _ = Describe("ConfigResolver", func() {
 			cleanup("default", "default-unreconciled")
 		})
 
-		It("should resolve the default PipelineConfig", func() {
-			createPipelineConfig("default", "default pipeline content")
+		It("should resolve the default PipelineConfig by label", func() {
+			createPipelineConfig("default", "default pipeline content",
+				map[string]string{fleetv1alpha1.LabelDefaultPipelineConfig: "true"})
 
 			resolver := NewConfigResolver(mgrClient)
 			Eventually(func(g Gomega) {
@@ -144,6 +146,7 @@ var _ = Describe("ConfigResolver", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "default",
 					Namespace: namespace,
+					Labels:    map[string]string{fleetv1alpha1.LabelDefaultPipelineConfig: "true"},
 				},
 				Spec: fleetv1alpha1.PipelineConfigSpec{
 					Content: "not yet reconciled",

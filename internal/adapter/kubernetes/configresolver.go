@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
 	"github.com/pkarakal/alloy-remote-config/internal/controller"
@@ -38,11 +39,21 @@ func (r *ConfigResolver) ResolveByCollectorGroup(ctx context.Context, namespace,
 }
 
 func (r *ConfigResolver) ResolveDefault(ctx context.Context, namespace string) (*port.ResolvedConfig, error) {
-	pc := &fleetv1alpha1.PipelineConfig{}
-	if err := r.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "default"}, pc); err != nil {
+	log := logf.FromContext(ctx)
+	list := &fleetv1alpha1.PipelineConfigList{}
+	if err := r.client.List(ctx, list,
+		client.InNamespace(namespace),
+		client.MatchingLabels{fleetv1alpha1.LabelDefaultPipelineConfig: "true"},
+	); err != nil {
+		return nil, fmt.Errorf("listing default PipelineConfigs: %w", err)
+	}
+	if len(list.Items) == 0 {
 		return nil, port.ErrConfigNotFound
 	}
-	return r.toPipelineResult(pc)
+	if len(list.Items) > 1 {
+		log.Info("Multiple default PipelineConfigs found, using first", "count", len(list.Items))
+	}
+	return r.toPipelineResult(&list.Items[0])
 }
 
 // resolveByIndex lists CollectorGroupBindings matching the given field index
