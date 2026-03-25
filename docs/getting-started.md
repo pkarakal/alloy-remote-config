@@ -53,8 +53,13 @@ In a separate terminal:
 kubectl apply -k config/samples/
 ```
 
-This creates a `PipelineConfig`, a `CollectorGroup`, and a `CollectorGroupBinding` wiring them together. After the first
-reconcile you should see:
+This creates a `PipelineConfig`, a `CollectorGroup`, and a `CollectorGroupBinding` wiring them together.
+
+> **Tip:** To designate a `PipelineConfig` as the default fallback (used when no tenant or group binding matches),
+> add the label `fleet.pkarakal.com/default-pipeline-config: "true"` to it. The Helm chart does this automatically
+> for the resources created under `values.defaults`.
+
+After the first reconcile you should see:
 
 ```bash
 kubectl get collectorgroupbindings -o wide
@@ -113,6 +118,28 @@ make run ARGS="--connect-bind-address=:9000"
 ```
 
 In a deployed cluster, set the flag in `config/manager/manager.yaml`.
+
+### Collector registration TTL
+
+When a collector calls `RegisterCollector`, its tenant is recorded in `status.registeredTenants` of the matching
+`CollectorGroupBinding`. Entries are evicted by the reconciler once they have not been refreshed within the TTL window.
+
+The default TTL is `5m`. Override it with `--collector-ttl`:
+
+```bash
+# Extend to 15 minutes (useful if collectors poll every 5 minutes)
+make run ARGS="--collector-ttl=15m"
+
+# Disable eviction entirely
+make run ARGS="--collector-ttl=0"
+```
+
+To inspect which tenants are currently registered:
+
+```bash
+kubectl get collectorgroupbindings -o custom-columns=\
+'NAME:.metadata.name,TENANTS:.status.registeredTenants[*].id'
+```
 
 ### Metrics
 

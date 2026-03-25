@@ -164,3 +164,36 @@ ingress:
   # - secretName: alloy-config-tls
   #   hosts:
   #     - alloy-config.example.com
+
+## Collector registration TTL.
+## Controls how long a registered tenant entry lives without a refresh before
+## the reconciler evicts it. Maps to the --collector-ttl manager flag.
+## Format: Go duration string (e.g. "5m", "30s"). Set to "0" to disable eviction.
+##
+collectorTTL: "5m"
+
+## Default resources created on chart install.
+## Provides a minimal working configuration out of the box.
+## Resources are labelled with well-known labels so the operator can discover
+## them by label rather than by name.
+##
+defaults:
+  ## Default CollectorGroup — collectors with no explicit group fall through to this.
+  collectorGroup:
+    enabled: true
+    name: "default"
+    description: "Default collector group"
+
+  ## Default PipelineConfig — served to collectors in the default group.
+  pipelineConfig:
+    enabled: true
+    name: "default"
+    description: "Default pipeline configuration"
+    content: |
+      // Replace with your Alloy pipeline configuration.
+
+  ## Default CollectorGroupBinding linking the default group to the default config.
+  ## Only created when both collectorGroup.enabled and pipelineConfig.enabled are true.
+  collectorGroupBinding:
+    enabled: true
+    name: "default"

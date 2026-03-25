@@ -209,6 +209,19 @@ var _ = Describe("CollectorService", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.Msg.Content).To(Equal("tenant wins"))
 		})
+
+		It("should succeed even when the registration refresh fails", func() {
+			resolver := &fakeResolver{
+				defaultConfig: &port.ResolvedConfig{Content: "default config", ContentHash: "hash"},
+			}
+			svc := NewCollectorService(resolver, &fakeRegistry{
+				registerErr: errors.New("registry unavailable"),
+			}, "default")
+
+			resp, err := svc.GetConfig(ctx, newGetConfigRequest("", nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.Content).To(Equal("default config"))
+		})
 	})
 
 	Context("RegisterCollector", func() {

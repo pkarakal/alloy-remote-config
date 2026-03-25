@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -44,6 +45,9 @@ var (
 type CollectorGroupBindingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// CollectorTTL is the duration after which a RegisteredTenant entry is
+	// evicted if its LastSeenAt has not been refreshed. Zero disables eviction.
+	CollectorTTL time.Duration
 }
 
 // +kubebuilder:rbac:groups=fleet.pkarakal.com,resources=collectorgroupbindings,verbs=get;list;watch;create;update;patch;delete
@@ -93,6 +97,11 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Step 4.5 — Evict stale registered tenants
+	if evicted := r.evictStaleTenants(groupBinding); evicted > 0 {
+		log.Info("Evicted stale registered tenants", "count", evicted, "binding", groupBinding.Name)
+	}
+
 	// Step 5 — Update status
 	groupBinding.Status.BoundPipelineConfigRef = groupBinding.Spec.PipelineConfigRef
 	groupBinding.Status.BoundCollectorGroupRef = groupBinding.Spec.CollectorGroupRef
@@ -101,7 +110,31 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 	groupBinding.Status.Phase = derivePhase(groupBinding.Status.Conditions)
 	groupBinding.Status.ObservedGeneration = groupBinding.Generation
 
-	return ctrl.Result{}, r.Status().Update(ctx, groupBinding)
+	if err := r.Status().Update(ctx, groupBinding); err != nil {
+		return ctrl.Result{}, err
+	}
+	if r.CollectorTTL > 0 && len(groupBinding.Status.RegisteredTenants) > 0 {
+		return ctrl.Result{RequeueAfter: r.CollectorTTL / 2}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+// evictStaleTenants removes RegisteredTenant entries whose LastSeenAt is older
+// than CollectorTTL. Returns the number of evicted entries.
+func (r *CollectorGroupBindingReconciler) evictStaleTenants(b *fleetv1alpha1.CollectorGroupBinding) int {
+	if r.CollectorTTL == 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-r.CollectorTTL)
+	before := len(b.Status.RegisteredTenants)
+	kept := b.Status.RegisteredTenants[:0]
+	for _, t := range b.Status.RegisteredTenants {
+		if t.LastSeenAt.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	b.Status.RegisteredTenants = kept
+	return before - len(b.Status.RegisteredTenants)
 }
 
 // handleDeletion decrements counters and strips the finalizer.

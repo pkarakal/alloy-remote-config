@@ -251,6 +251,45 @@
           "items": { "type": "object" }
         }
       }
+    },
+    "collectorTTL": {
+      "type": "string",
+      "description": "Go duration string for the collector registration TTL (e.g. \"5m\", \"0\" to disable).",
+      "pattern": "^(0|[1-9][0-9]*(ns|us|\u00b5s|ms|s|m|h))$"
+    },
+    "defaults": {
+      "type": "object",
+      "description": "Default resources created on chart install.",
+      "additionalProperties": false,
+      "properties": {
+        "collectorGroup": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled":     { "type": "boolean", "description": "Create a default CollectorGroup." },
+            "name":        { "type": "string", "minLength": 1, "description": "Name of the default CollectorGroup." },
+            "description": { "type": "string", "description": "Description of the default CollectorGroup." }
+          }
+        },
+        "pipelineConfig": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled":     { "type": "boolean", "description": "Create a default PipelineConfig." },
+            "name":        { "type": "string", "minLength": 1, "description": "Name of the default PipelineConfig." },
+            "description": { "type": "string", "description": "Description of the default PipelineConfig." },
+            "content":     { "type": "string", "description": "Alloy pipeline content for the default config." }
+          }
+        },
+        "collectorGroupBinding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "description": "Create a default CollectorGroupBinding." },
+            "name":    { "type": "string", "minLength": 1, "description": "Name of the default CollectorGroupBinding." }
+          }
+        }
+      }
     }
   }
 }

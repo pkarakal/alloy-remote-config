@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
@@ -526,6 +528,108 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			reqs := r.enqueueBindingsForPipelineConfig(ctx, pc)
 			Expect(reqs[0].NamespacedName).To(Equal(bindingNN))
+		})
+	})
+
+	Context("TTL eviction of registered tenants", func() {
+		const ttlBindingName = "ttl-binding"
+		const ttlPCName = "ttl-pc"
+
+		ttlBindingNN := types.NamespacedName{Name: ttlBindingName, Namespace: namespace}
+
+		BeforeEach(func() {
+			createPipelineConfig(ttlPCName)
+			b := &fleetv1alpha1.CollectorGroupBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: ttlBindingName, Namespace: namespace},
+				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
+					TenantRef:         "ttl-tenant",
+					PipelineConfigRef: ttlPCName,
+				},
+			}
+			Expect(k8sClient.Create(ctx, b)).To(Succeed())
+			// Add a finalizer so we control deletion in AfterEach.
+			b.Finalizers = []string{CollectorGroupBindingFinalizer}
+			Expect(k8sClient.Update(ctx, b)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			_ = k8sClient.Get(ctx, ttlBindingNN, b)
+			b.Finalizers = nil
+			_ = k8sClient.Update(ctx, b)
+			_ = k8sClient.Delete(ctx, b)
+			deletePipelineConfig(ttlPCName)
+		})
+
+		seedTenant := func(lastSeenAt metav1.Time) {
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, b)).To(Succeed())
+			b.Status.RegisteredTenants = []fleetv1alpha1.RegisteredTenant{
+				{ID: "ttl-tenant", CollectorID: "col-ttl", LastSeenAt: lastSeenAt},
+			}
+			Expect(k8sClient.Status().Update(ctx, b)).To(Succeed())
+		}
+
+		It("keeps a fresh tenant when TTL has not elapsed", func() {
+			seedTenant(metav1.Now())
+
+			r := &CollectorGroupBindingReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				CollectorTTL: time.Minute,
+			}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, b)).To(Succeed())
+			Expect(b.Status.RegisteredTenants).To(HaveLen(1))
+		})
+
+		It("evicts a stale tenant when TTL has elapsed", func() {
+			seedTenant(metav1.NewTime(time.Now().Add(-10 * time.Minute)))
+
+			r := &CollectorGroupBindingReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				CollectorTTL: 5 * time.Minute,
+			}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, b)).To(Succeed())
+			Expect(b.Status.RegisteredTenants).To(BeEmpty())
+		})
+
+		It("does not evict when CollectorTTL is 0 (disabled)", func() {
+			seedTenant(metav1.NewTime(time.Now().Add(-10 * time.Minute)))
+
+			r := &CollectorGroupBindingReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				CollectorTTL: 0,
+			}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, b)).To(Succeed())
+			Expect(b.Status.RegisteredTenants).To(HaveLen(1))
+		})
+
+		It("returns RequeueAfter=TTL/2 when live tenants exist", func() {
+			seedTenant(metav1.Now())
+
+			ttl := 10 * time.Minute
+			r := &CollectorGroupBindingReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				CollectorTTL: ttl,
+			}
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(ttl / 2))
 		})
 	})
 })

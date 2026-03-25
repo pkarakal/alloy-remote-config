@@ -8,6 +8,7 @@ import (
 	"flag"
 	"net/http"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -29,7 +30,6 @@ import (
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
 	kubernetesadapter "github.com/pkarakal/alloy-remote-config/internal/adapter/kubernetes"
-	"github.com/pkarakal/alloy-remote-config/internal/adapter/noop"
 	"github.com/pkarakal/alloy-remote-config/internal/controller"
 	"github.com/pkarakal/alloy-remote-config/internal/interceptor"
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
@@ -54,6 +54,7 @@ func init() {
 func main() {
 	var connectAddr string
 	var namespace string
+	var collectorTTL time.Duration
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
@@ -83,6 +84,8 @@ func main() {
 		"The address the Connect-RPC server binds to.")
 	flag.StringVar(&namespace, "namespace", detectNamespace(),
 		"The namespace to resolve pipeline configurations in.")
+	flag.DurationVar(&collectorTTL, "collector-ttl", 5*time.Minute,
+		"Duration after which a registered tenant entry is evicted if not refreshed. Set to 0 to disable.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -199,8 +202,9 @@ func main() {
 	}
 
 	if err := (&controller.CollectorGroupBindingReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		CollectorTTL: collectorTTL,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "CollectorGroupBinding")
 		os.Exit(1)
@@ -219,7 +223,7 @@ func main() {
 
 	baseResolver := kubernetesadapter.NewConfigResolver(mgr.GetClient())
 	resolver := kubernetesadapter.NewMetricsConfigResolver(baseResolver, resMetrics)
-	registry := &noop.CollectorRegistry{}
+	registry := kubernetesadapter.NewKubernetesCollectorRegistry(mgr.GetClient(), namespace)
 	collectorSvc := service.NewCollectorService(resolver, registry, namespace, rpcMetrics)
 
 	mux := http.NewServeMux()
