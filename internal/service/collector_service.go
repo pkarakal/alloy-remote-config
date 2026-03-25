@@ -61,6 +61,14 @@ func (s *CollectorService) GetConfig(
 		"collectorGroup", collectorGroup,
 	)
 
+	// Refresh the registration on every poll so LastSeenAt stays current.
+	// Alloy only calls RegisterCollector once on startup, not on each poll tick,
+	// so piggybacking here is the only way to keep TTL-based eviction accurate.
+	if err := s.refreshActiveTenants(ctx, msg.GetId(), "", msg.GetLocalAttributes()); err != nil {
+		log.V(1).Info("Could not refresh collector registration during GetConfig",
+			"collectorID", msg.GetId(), "err", err)
+	}
+
 	resolved, err := s.resolveConfig(ctx, tenant, collectorGroup)
 	if err != nil {
 		log.Error(err, "Failed to resolve config")
@@ -134,15 +142,23 @@ func (s *CollectorService) RegisterCollector(
 ) (*connect.Response[collectorv1.RegisterCollectorResponse], error) {
 	log := logf.FromContext(ctx)
 	msg := req.Msg
-	if err := s.registry.Register(ctx, port.CollectorInfo{
-		ID:              msg.GetId(),
-		Name:            msg.GetName(),
-		LocalAttributes: msg.GetLocalAttributes(),
-	}); err != nil {
+	if err := s.refreshActiveTenants(ctx, msg.GetId(), msg.GetName(), msg.GetLocalAttributes()); err != nil {
 		log.Error(err, "Failed to register collector", "id", msg.GetId())
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&collectorv1.RegisterCollectorResponse{}), nil
+}
+
+// refreshActiveTenants upserts the collector into the matching CollectorGroupBinding's
+// registeredTenants. It is called from both RegisterCollector (explicit registration,
+// errors are fatal) and GetConfig (implicit heartbeat, errors are non-fatal) because
+// Alloy only calls RegisterCollector once on startup, GetConfig is the only periodic call.
+func (s *CollectorService) refreshActiveTenants(ctx context.Context, id, name string, attrs map[string]string) error {
+	return s.registry.Register(ctx, port.CollectorInfo{
+		ID:              id,
+		Name:            name,
+		LocalAttributes: attrs,
+	})
 }
 
 func (s *CollectorService) UnregisterCollector(
