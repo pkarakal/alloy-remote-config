@@ -30,6 +30,25 @@ type CollectorGroupBindingSpec struct {
 	PipelineConfigRef string `json:"pipelineConfigRef"`
 }
 
+// RegisteredTenant records a tenant that has called RegisterCollector and has
+// been matched to this binding. Entries are evicted by the reconciler when
+// LastSeenAt is older than the configured collector TTL.
+type RegisteredTenant struct {
+	// ID is the tenant ID from LocalAttributes["tenant"].
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+
+	// CollectorID is the collector instance ID from RegisterCollectorRequest.Id.
+	// Stored so that UnregisterCollector (which only carries the collector ID)
+	// can find and remove this entry.
+	// +kubebuilder:validation:Required
+	CollectorID string `json:"collectorId"`
+
+	// LastSeenAt is the time the collector last called RegisterCollector for this tenant.
+	LastSeenAt metav1.Time `json:"lastSeenAt"`
+}
+
 // CollectorGroupBindingStatus defines the observed state of CollectorGroupBinding.
 type CollectorGroupBindingStatus struct {
 	// Phase summarises the current state of this binding.
@@ -68,6 +87,15 @@ type CollectorGroupBindingStatus struct {
 	// successful reconcile. Used to detect ref changes for idempotent
 	// activeBindings counter management.
 	BoundCollectorGroupRef string `json:"boundCollectorGroupRef,omitempty"`
+
+	// RegisteredTenants is the list of tenants currently registered against
+	// this binding. Entries are upserted on RegisterCollector and removed on
+	// UnregisterCollector or when the entry has not been refreshed within the
+	// collector TTL window.
+	// +optional
+	// +listType=map
+	// +listMapKey=id
+	RegisteredTenants []RegisteredTenant `json:"registeredTenants,omitempty"`
 }
 
 type CollectorGroupBindingPhase string

@@ -184,6 +184,42 @@ spec:
               phase:
                 description: Phase summarises the current state of this binding.
                 type: string
+              registeredTenants:
+                description: |-
+                  RegisteredTenants is the list of tenants currently registered against
+                  this binding. Entries are upserted on RegisterCollector and removed on
+                  UnregisterCollector or when the entry has not been refreshed within the
+                  collector TTL window.
+                items:
+                  description: |-
+                    RegisteredTenant records a tenant that has called RegisterCollector and has
+                    been matched to this binding. Entries are evicted by the reconciler when
+                    LastSeenAt is older than the configured collector TTL.
+                  properties:
+                    collectorId:
+                      description: |-
+                        CollectorID is the collector instance ID from RegisterCollectorRequest.Id.
+                        Stored so that UnregisterCollector (which only carries the collector ID)
+                        can find and remove this entry.
+                      type: string
+                    id:
+                      description: ID is the tenant ID from LocalAttributes["tenant"].
+                      minLength: 1
+                      type: string
+                    lastSeenAt:
+                      description: LastSeenAt is the time the collector last called
+                        RegisterCollector for this tenant.
+                      format: date-time
+                      type: string
+                  required:
+                  - collectorId
+                  - id
+                  - lastSeenAt
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - id
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec
