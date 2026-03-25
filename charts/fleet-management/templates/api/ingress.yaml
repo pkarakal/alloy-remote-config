@@ -28,9 +28,15 @@ spec:
         pathType: {{ .pathType }}
         backend:
           service:
+            {{- if $.Values.gateway.enabled }}
+            name: {{ include "fleet-management.resourceName" (dict "suffix" "gateway" "context" $) }}
+            port:
+              name: proxy
+            {{- else }}
             name: {{ include "fleet-management.resourceName" (dict "suffix" "api" "context" $) }}
             port:
               name: connect-rpc
+            {{- end }}
       {{- end }}
   {{- end }}
 {{- end }}

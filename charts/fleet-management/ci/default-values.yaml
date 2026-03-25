@@ -7,10 +7,19 @@
 
 manager:
   image:
-    repository: controller
+    registry: ghcr.io
+    repository: pkarakal/alloy-remote-config
     tag: latest
     pullPolicy: Never
   args: []
 
 metrics:
   enable: false
+
+defaults:
+  collectorGroup:
+    enabled: false
+  pipelineConfig:
+    enabled: false
+  collectorGroupBinding:
+    enabled: false

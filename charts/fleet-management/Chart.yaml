@@ -5,7 +5,7 @@ description: >
   via the alloy-remote-config API (Connect-RPC).
 type: application
 
-version: 0.2.0
+version: 0.3.0
 appVersion: "0.2.0"
 
 keywords:

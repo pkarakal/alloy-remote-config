@@ -6,7 +6,8 @@
 
 manager:
   image:
-    repository: controller
+    registry: ghcr.io
+    repository: pkarakal/alloy-remote-config
     tag: latest
     pullPolicy: Never
   replicas: 2
@@ -25,3 +26,11 @@ manager:
 metrics:
   enable: true
   port: 8443
+
+defaults:
+  collectorGroup:
+    enabled: false
+  pipelineConfig:
+    enabled: false
+  collectorGroupBinding:
+    enabled: false
