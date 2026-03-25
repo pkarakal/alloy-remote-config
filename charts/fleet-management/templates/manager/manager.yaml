@@ -48,6 +48,7 @@ spec:
         - --metrics-bind-address=0
         {{- end }}
         - --health-probe-bind-address=:8081
+        - --collector-ttl={{ .Values.collectorTTL }}
         {{- range .Values.manager.args }}
         - {{ . }}
         {{- end }}
