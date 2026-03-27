@@ -13,6 +13,11 @@ import (
 // metricsNamespace is the common prefix for all custom metrics in this operator.
 const metricsNamespace = "alloy_remote_config"
 
+// ServiceVersion is injected at build time via -ldflags.
+// It is set to the exact git tag if building from a tagged commit,
+// or the branch name otherwise.
+var ServiceVersion = "dev"
+
 // rpcDurationBuckets covers the expected latency range for Connect-RPC calls
 // that traverse the network and execute handler logic (sub-millisecond to seconds).
 var rpcDurationBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0}
@@ -169,12 +174,8 @@ func NewBuildInfoMetric() *BuildInfoMetric {
 // Call this once at startup after the metric is registered.
 func (b *BuildInfoMetric) Set() {
 	goVersion := runtime.Version()
-	version := "unknown"
 	gitRevision := "unknown"
 	if info, ok := debug.ReadBuildInfo(); ok {
-		if info.Main.Version != "" {
-			version = info.Main.Version
-		}
 		for _, s := range info.Settings {
 			if s.Key == "vcs.revision" {
 				gitRevision = s.Value
@@ -182,5 +183,5 @@ func (b *BuildInfoMetric) Set() {
 			}
 		}
 	}
-	b.Info.WithLabelValues(version, goVersion, gitRevision).Set(1)
+	b.Info.WithLabelValues(ServiceVersion, goVersion, gitRevision).Set(1)
 }
