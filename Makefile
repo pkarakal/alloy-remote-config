@@ -1,6 +1,10 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 
+# SERVICE_VERSION is the version string injected into the binary at build time.
+# Uses the exact git tag if on a tagged commit, otherwise falls back to the branch name.
+SERVICE_VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --abbrev-ref HEAD)
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -117,7 +121,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build -t ${IMG} --build-arg SERVICE_VERSION=$(SERVICE_VERSION) .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -136,7 +140,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name alloy-remote-config-builder
 	$(CONTAINER_TOOL) buildx use alloy-remote-config-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} --build-arg SERVICE_VERSION=$(SERVICE_VERSION) -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm alloy-remote-config-builder
 	rm Dockerfile.cross
 
