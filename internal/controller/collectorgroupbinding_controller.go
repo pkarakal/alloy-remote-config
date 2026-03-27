@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 )
 
 const (
@@ -48,6 +49,8 @@ type CollectorGroupBindingReconciler struct {
 	// CollectorTTL is the duration after which a RegisteredTenant entry is
 	// evicted if its LastSeenAt has not been refreshed. Zero disables eviction.
 	CollectorTTL time.Duration
+	// Metrics holds optional controller-level Prometheus metrics. May be nil.
+	Metrics *metrics.ControllerMetrics
 }
 
 // +kubebuilder:rbac:groups=fleet.pkarakal.com,resources=collectorgroupbindings,verbs=get;list;watch;create;update;patch;delete
@@ -100,6 +103,9 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 	// Step 4.5 — Evict stale registered tenants
 	if evicted := r.evictStaleTenants(groupBinding); evicted > 0 {
 		log.Info("Evicted stale registered tenants", "count", evicted, "binding", groupBinding.Name)
+		if r.Metrics != nil {
+			r.Metrics.TenantsEvicted.Add(float64(evicted))
+		}
 	}
 
 	// Step 5 — Update status

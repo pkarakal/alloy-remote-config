@@ -17,6 +17,7 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpcreflect"
 	"github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1/collectorv1connect"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -87,7 +88,7 @@ func main() {
 	flag.DurationVar(&collectorTTL, "collector-ttl", 5*time.Minute,
 		"Duration after which a registered tenant entry is evicted if not refreshed. Set to 0 to disable.")
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -201,25 +202,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	rpcMetrics := metrics.NewRPCMetrics()
+	resMetrics := metrics.NewResolutionMetrics()
+	rc := metrics.NewResourceCollector(mgr.GetClient(), namespace)
+	buildInfo := metrics.NewBuildInfoMetric()
+	ctrlMetrics := metrics.NewControllerMetrics()
+	httpMetrics := metrics.NewHTTPMetrics()
+	if err := metrics.Register(ctrlmetrics.Registry, rpcMetrics, resMetrics, rc, buildInfo, ctrlMetrics, httpMetrics); err != nil {
+		setupLog.Error(err, "Failed to register custom metrics")
+		os.Exit(1)
+	}
+	buildInfo.Set()
+
 	if err := (&controller.CollectorGroupBindingReconciler{
 		Client:       mgr.GetClient(),
 		Scheme:       mgr.GetScheme(),
 		CollectorTTL: collectorTTL,
+		Metrics:      ctrlMetrics,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "CollectorGroupBinding")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
-
-	rpcMetrics := metrics.NewRPCMetrics()
-	resMetrics := metrics.NewResolutionMetrics()
-	rc := metrics.NewResourceCollector(mgr.GetClient(), namespace)
-	buildInfo := metrics.NewBuildInfoMetric()
-	if err := metrics.Register(ctrlmetrics.Registry, rpcMetrics, resMetrics, rc, buildInfo); err != nil {
-		setupLog.Error(err, "Failed to register custom metrics")
-		os.Exit(1)
-	}
-	buildInfo.Set()
 
 	baseResolver := kubernetesadapter.NewConfigResolver(mgr.GetClient())
 	resolver := kubernetesadapter.NewMetricsConfigResolver(baseResolver, resMetrics)
@@ -235,7 +239,11 @@ func main() {
 	reflector := grpcreflect.NewStaticReflector(collectorv1connect.CollectorServiceName)
 	mux.Handle(grpcreflect.NewHandlerV1(reflector))
 
-	connectServer := server.NewConnectServer(mux, connectAddr)
+	var connectHandler http.Handler = mux
+	connectHandler = promhttp.InstrumentHandlerDuration(httpMetrics.RequestDuration, connectHandler)
+	connectHandler = promhttp.InstrumentHandlerCounter(httpMetrics.RequestsTotal, connectHandler)
+
+	connectServer := server.NewConnectServer(connectHandler, connectAddr)
 	if err := mgr.Add(connectServer); err != nil {
 		setupLog.Error(err, "Failed to add Connect-RPC server to manager")
 		os.Exit(1)

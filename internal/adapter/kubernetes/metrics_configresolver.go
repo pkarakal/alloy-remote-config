@@ -50,8 +50,9 @@ func (m *MetricsConfigResolver) observe(resolutionPath string, fn func() (*port.
 	result, err := fn()
 	elapsed := time.Since(start).Seconds()
 
-	m.metrics.Total.WithLabelValues(resolutionPath, classifyOutcome(err)).Inc()
-	m.metrics.Duration.WithLabelValues(resolutionPath).Observe(elapsed)
+	outcome := classifyOutcome(err)
+	m.metrics.Total.WithLabelValues(resolutionPath, outcome).Inc()
+	m.metrics.Duration.WithLabelValues(resolutionPath, outcome).Observe(elapsed)
 
 	return result, err
 }

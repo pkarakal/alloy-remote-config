@@ -15,7 +15,7 @@ const metricsNamespace = "alloy_remote_config"
 
 // rpcDurationBuckets covers the expected latency range for Connect-RPC calls
 // that traverse the network and execute handler logic (sub-millisecond to seconds).
-var rpcDurationBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5}
+var rpcDurationBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0}
 
 // resolutionDurationBuckets covers the expected latency range for informer-cache
 // lookups, which are pure in-memory operations and should complete in well under 1ms.
@@ -48,10 +48,10 @@ func NewRPCMetrics() *RPCMetrics {
 			prometheus.HistogramOpts{
 				Namespace: metricsNamespace,
 				Name:      "rpc_request_duration_seconds",
-				Help:      "Histogram of Connect-RPC request duration in seconds, partitioned by procedure.",
+				Help:      "Histogram of Connect-RPC request duration in seconds, partitioned by procedure and response status code.",
 				Buckets:   rpcDurationBuckets,
 			},
-			[]string{"procedure"},
+			[]string{"procedure", "code"},
 		),
 		Served: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -89,11 +89,61 @@ func NewResolutionMetrics() *ResolutionMetrics {
 			prometheus.HistogramOpts{
 				Namespace: metricsNamespace,
 				Name:      "config_resolution_duration_seconds",
-				Help:      "Histogram of config resolution duration in seconds, partitioned by resolution path.",
+				Help:      "Histogram of config resolution duration in seconds, partitioned by resolution path and outcome.",
 				Buckets:   resolutionDurationBuckets,
 			},
-			[]string{"path"},
+			[]string{"path", "outcome"},
 		),
+	}
+}
+
+// HTTPMetrics holds Prometheus metrics for the Connect-RPC HTTP server layer.
+// These complement the RPC interceptor metrics by capturing requests that never
+// reach a handler (unknown routes, reflection calls, pre-handler HTTP errors).
+type HTTPMetrics struct {
+	// RequestsTotal counts all HTTP requests, partitioned by method and status code.
+	RequestsTotal *prometheus.CounterVec
+	// RequestDuration measures HTTP request latency per method.
+	RequestDuration *prometheus.HistogramVec
+}
+
+// NewHTTPMetrics creates an initialised HTTPMetrics instance ready to be registered.
+func NewHTTPMetrics() *HTTPMetrics {
+	return &HTTPMetrics{
+		RequestsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "http_requests_total",
+				Help:      "Total number of HTTP requests received by the Connect-RPC server, partitioned by method and status code.",
+			},
+			[]string{"method", "code"},
+		),
+		RequestDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: metricsNamespace,
+				Name:      "http_request_duration_seconds",
+				Help:      "Histogram of HTTP request duration in seconds for the Connect-RPC server, partitioned by method and HTTP status code.",
+				Buckets:   rpcDurationBuckets,
+			},
+			[]string{"method", "code"},
+		),
+	}
+}
+
+// ControllerMetrics holds Prometheus metrics for the operator's controllers.
+type ControllerMetrics struct {
+	// TenantsEvicted counts registered tenant entries removed due to TTL expiry.
+	TenantsEvicted prometheus.Counter
+}
+
+// NewControllerMetrics creates an initialised ControllerMetrics instance ready to be registered.
+func NewControllerMetrics() *ControllerMetrics {
+	return &ControllerMetrics{
+		TenantsEvicted: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Name:      "registered_tenants_evicted_total",
+			Help:      "Total number of registered tenant entries evicted due to TTL expiry.",
+		}),
 	}
 }
 
@@ -111,7 +161,7 @@ func NewBuildInfoMetric() *BuildInfoMetric {
 			Namespace: metricsNamespace,
 			Name:      "build_info",
 			Help:      "A metric with a constant value of 1 that exposes build and version information for the operator.",
-		}, []string{"version", "goversion"}),
+		}, []string{"version", "goversion", "git_revision"}),
 	}
 }
 
@@ -120,8 +170,17 @@ func NewBuildInfoMetric() *BuildInfoMetric {
 func (b *BuildInfoMetric) Set() {
 	goVersion := runtime.Version()
 	version := "unknown"
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
-		version = info.Main.Version
+	gitRevision := "unknown"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Version != "" {
+			version = info.Main.Version
+		}
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" {
+				gitRevision = s.Value
+				break
+			}
+		}
 	}
-	b.Info.WithLabelValues(version, goVersion).Set(1)
+	b.Info.WithLabelValues(version, goVersion, gitRevision).Set(1)
 }

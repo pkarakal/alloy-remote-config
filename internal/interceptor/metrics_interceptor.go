@@ -5,7 +5,6 @@ package interceptor
 
 import (
 	"context"
-	"path"
 	"time"
 
 	"connectrpc.com/connect"
@@ -16,14 +15,14 @@ import (
 // NewMetricsInterceptor returns a Connect-RPC interceptor that records request
 // count and latency for every unary RPC call. It tracks:
 //   - alloy_remote_config_rpc_requests_total{procedure, code}
-//   - alloy_remote_config_rpc_request_duration_seconds{procedure}
+//   - alloy_remote_config_rpc_request_duration_seconds{procedure, code}
 //
-// The procedure label is the short method name (e.g. "GetConfig") trimmed from
-// the full Connect procedure path.
+// The procedure label is the full Connect procedure path
+// (e.g. "/collector.v1.CollectorService/GetConfig").
 func NewMetricsInterceptor(m *metrics.RPCMetrics) connect.Interceptor {
 	return connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			procedure := path.Base(req.Spec().Procedure)
+			procedure := req.Spec().Procedure
 			start := time.Now()
 
 			resp, err := next(ctx, req)
@@ -39,7 +38,7 @@ func NewMetricsInterceptor(m *metrics.RPCMetrics) connect.Interceptor {
 			}
 
 			m.Requests.WithLabelValues(procedure, code).Inc()
-			m.Duration.WithLabelValues(procedure).Observe(elapsed)
+			m.Duration.WithLabelValues(procedure, code).Observe(elapsed)
 
 			return resp, err
 		}
