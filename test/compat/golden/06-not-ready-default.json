@@ -1,0 +1,21 @@
+{
+  "both": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.prod.input]\n    logs    = [otelcol.exporter.otlphttp.prod.input]\n    traces  = [otelcol.exporter.otlphttp.prod.input]\n  }\n}\n\notelcol.exporter.otlphttp \"prod\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_PROD\")\n  }\n}\n",
+    "hash": "6362835b3b2f960a730d7f86d6c7ca70bccff456d45b42329c3686a7f357e115"
+  },
+  "group-only": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.prod.input]\n    logs    = [otelcol.exporter.otlphttp.prod.input]\n    traces  = [otelcol.exporter.otlphttp.prod.input]\n  }\n}\n\notelcol.exporter.otlphttp \"prod\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_PROD\")\n  }\n}\n",
+    "hash": "6362835b3b2f960a730d7f86d6c7ca70bccff456d45b42329c3686a7f357e115"
+  },
+  "neither": {
+    "code": "unavailable"
+  },
+  "tenant-only": {
+    "code": "unavailable"
+  },
+  "unknown": {
+    "code": "unavailable"
+  }
+}

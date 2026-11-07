@@ -1,0 +1,94 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+# Two bindings for tenant "acme": the served winner is nondeterministic today (cache list
+# order). WS-S makes it deterministic by creationTimestamp, then name.
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  name: default-config
+  labels:
+    fleet.pkarakal.com/default-pipeline-config: "true"
+spec:
+  content: |
+    otelcol.receiver.otlp "default" {
+      http {}
+      grpc {}
+
+      output {
+        metrics = [otelcol.exporter.otlphttp.default.input]
+        logs    = [otelcol.exporter.otlphttp.default.input]
+        traces  = [otelcol.exporter.otlphttp.default.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "default" {
+      client {
+        endpoint = sys.env("OTLP_ENDPOINT_DEFAULT")
+      }
+    }
+  description: Compat fixture default-config
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  name: acme-config-a
+spec:
+  content: |
+    otelcol.receiver.otlp "default" {
+      http {}
+      grpc {}
+
+      output {
+        metrics = [otelcol.exporter.otlphttp.acme_a.input]
+        logs    = [otelcol.exporter.otlphttp.acme_a.input]
+        traces  = [otelcol.exporter.otlphttp.acme_a.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "acme_a" {
+      client {
+        endpoint = sys.env("OTLP_ENDPOINT_ACME_A")
+      }
+    }
+  description: Compat fixture acme-config-a
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  name: acme-config-b
+spec:
+  content: |
+    otelcol.receiver.otlp "default" {
+      http {}
+      grpc {}
+
+      output {
+        metrics = [otelcol.exporter.otlphttp.acme_b.input]
+        logs    = [otelcol.exporter.otlphttp.acme_b.input]
+        traces  = [otelcol.exporter.otlphttp.acme_b.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "acme_b" {
+      client {
+        endpoint = sys.env("OTLP_ENDPOINT_ACME_B")
+      }
+    }
+  description: Compat fixture acme-config-b
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroupBinding
+metadata:
+  name: acme-binding-a
+spec:
+  tenantRef: acme
+  pipelineConfigRef: acme-config-a
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroupBinding
+metadata:
+  name: acme-binding-b
+spec:
+  tenantRef: acme
+  pipelineConfigRef: acme-config-b
