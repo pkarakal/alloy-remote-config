@@ -288,6 +288,17 @@ var _ = Describe("CollectorRegistry write path", func() {
 			Expect(e.LastError).To(Equal("boom"))
 			Expect(e.StatusChangedAt.Time).To(Equal(before.StatusChangedAt.Time))
 		})
+
+		// Alloy omits the status on polls where it has not changed.
+		It("keeps the stored status on a Heartbeat without a status", func() {
+			reg, _, _ := setup()
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusFailed, "boom"))).To(Succeed())
+
+			Expect(reg.Heartbeat(ctx, info("c1", "status"))).To(Succeed())
+			e := getBinding(bindingName).Status.RegisteredTenants[0]
+			Expect(e.ConfigStatus).To(Equal(fleetv1alpha1.ConfigStatusFailed))
+			Expect(e.LastError).To(Equal("boom"))
+		})
 	})
 
 	Context("registeredTenants cap", func() {

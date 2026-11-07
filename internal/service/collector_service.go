@@ -62,8 +62,13 @@ func (s *CollectorService) GetConfig(
 		"collectorGroup", collectorGroup,
 	)
 
-	status := configStatusFromProto(msg.GetRemoteConfigStatus().GetStatus())
-	s.countStatusReport(status)
+	// Alloy only sends a status when it changed since its last request, so a
+	// missing status means "no news" and must not overwrite the stored one.
+	var status port.ConfigStatus
+	if rcs := msg.GetRemoteConfigStatus(); rcs != nil {
+		status = configStatusFromProto(rcs.GetStatus())
+		s.countStatusReport(status)
+	}
 
 	// Heartbeat on every poll so LastSeenAt stays current for TTL eviction;
 	// Alloy only calls RegisterCollector once on startup. The registry throttles

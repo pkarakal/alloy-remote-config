@@ -269,13 +269,29 @@ var _ = Describe("CollectorService", func() {
 			Entry("applying", &collectorv1.RemoteConfigStatus{Status: collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_APPLYING}, "applying"),
 			Entry("failed", &collectorv1.RemoteConfigStatus{Status: collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_FAILED}, "failed"),
 			Entry("unset", &collectorv1.RemoteConfigStatus{}, "unknown"),
-			Entry("missing", nil, "unknown"),
 		)
 
-		It("maps a missing status to Unknown for Heartbeat", func() {
+		It("does not count a request without a status as a report", func() {
+			m := metrics.NewRPCMetrics()
+			svc := NewCollectorService(resolver(), &fakeRegistry{}, "default", m)
+			_, err := svc.GetConfig(ctx, newReq(nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(testutil.CollectAndCount(m.StatusReports)).To(BeZero())
+		})
+
+		// Alloy omits the status when it has not changed since the last request.
+		It("leaves the stored status alone when the request has no status", func() {
 			reg := &fakeRegistry{}
 			svc := NewCollectorService(resolver(), reg, "default")
 			_, err := svc.GetConfig(ctx, newReq(nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reg.lastHeartbeat.ConfigStatus).To(BeEmpty())
+		})
+
+		It("maps an explicit UNSET status to Unknown", func() {
+			reg := &fakeRegistry{}
+			svc := NewCollectorService(resolver(), reg, "default")
+			_, err := svc.GetConfig(ctx, newReq(&collectorv1.RemoteConfigStatus{}))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(reg.lastHeartbeat.ConfigStatus).To(Equal(port.ConfigStatusUnknown))
 		})
