@@ -162,17 +162,35 @@ func (r *CollectorRegistry) upsert(ctx context.Context, info port.CollectorInfo,
 			r.reportTruncated(ctx, binding)
 			return nil
 		}
-		if throttle && idx >= 0 &&
-			binding.Status.RegisteredTenants[idx].LastSeenAt.After(now.Add(-r.throttleInterval)) {
+		var existing *fleetv1alpha1.RegisteredTenant
+		if idx >= 0 {
+			existing = &binding.Status.RegisteredTenants[idx]
+		}
+		// A status change bypasses the throttle so a Failed report is visible at once.
+		if throttle && existing != nil &&
+			existing.LastSeenAt.After(now.Add(-r.throttleInterval)) &&
+			!statusChanged(existing, info) {
 			return nil
 		}
 
 		base := binding.DeepCopy()
-		upsertTenant(&binding.Status.RegisteredTenants, fleetv1alpha1.RegisteredTenant{
+		entry := fleetv1alpha1.RegisteredTenant{
 			ID:          tenant,
 			CollectorID: info.ID,
 			LastSeenAt:  metav1.NewTime(now),
-		})
+		}
+		if existing != nil {
+			entry.ConfigStatus = existing.ConfigStatus
+			entry.LastError = existing.LastError
+			entry.StatusChangedAt = existing.StatusChangedAt
+		}
+		if statusChanged(existing, info) {
+			entry.ConfigStatus = fleetv1alpha1.ConfigStatus(info.ConfigStatus)
+			entry.LastError = fleetv1alpha1.TruncateError(info.ConfigError)
+			changedAt := metav1.NewTime(now)
+			entry.StatusChangedAt = &changedAt
+		}
+		upsertTenant(&binding.Status.RegisteredTenants, entry)
 		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
 		patchErr := r.client.Status().Patch(ctx, binding, patch)
 		if patchErr == nil {
@@ -185,6 +203,19 @@ func (r *CollectorRegistry) upsert(ctx context.Context, info port.CollectorInfo,
 			"attempt", attempt+1, "binding", key.Name)
 	}
 	return fmt.Errorf("failed to register tenant %q after %d attempts", tenant, maxPatchRetries)
+}
+
+// statusChanged reports whether info carries a status that differs from the
+// stored entry. An empty info.ConfigStatus (Register) never counts as a change.
+func statusChanged(existing *fleetv1alpha1.RegisteredTenant, info port.CollectorInfo) bool {
+	if info.ConfigStatus == "" {
+		return false
+	}
+	if existing == nil {
+		return true
+	}
+	return existing.ConfigStatus != fleetv1alpha1.ConfigStatus(info.ConfigStatus) ||
+		existing.LastError != fleetv1alpha1.TruncateError(info.ConfigError)
 }
 
 // reportTruncated counts a dropped registration and logs once per binding.

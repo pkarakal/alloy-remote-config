@@ -6,6 +6,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -225,6 +226,78 @@ var _ = Describe("CollectorRegistry write path", func() {
 			}
 			Expect(polls).To(Equal(60))
 			Expect(cc.patches.Load()).To(Equal(int64(1)))
+		})
+	})
+
+	Context("apply status", func() {
+		const bindingName = "write-status-binding"
+
+		withStatus := func(st port.ConfigStatus, msg string) port.CollectorInfo {
+			i := info("c1", "status")
+			i.ConfigStatus, i.ConfigError = st, msg
+			return i
+		}
+
+		setup := func() (*CollectorRegistry, *patchCountingClient, *testClock) {
+			createBinding(bindingName, "status")
+			waitForCache("status")
+			clock := &testClock{t: time.Now().Truncate(time.Second)}
+			cc := &patchCountingClient{Client: mgrClient}
+			return NewKubernetesCollectorRegistry(cc, k8sClient, namespace,
+				WithCollectorTTL(4*time.Minute), WithClock(clock.Now)), cc, clock
+		}
+
+		It("writes a status change inside the throttle window but not a repeat", func() {
+			reg, cc, clock := setup()
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusApplied, ""))).To(Succeed())
+			Expect(cc.patches.Load()).To(Equal(int64(1)))
+
+			clock.Advance(5 * time.Second)
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusApplied, ""))).To(Succeed())
+			Expect(cc.patches.Load()).To(Equal(int64(1)))
+
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusFailed, "boom"))).To(Succeed())
+			Expect(cc.patches.Load()).To(Equal(int64(2)))
+			e := getBinding(bindingName).Status.RegisteredTenants[0]
+			Expect(e.ConfigStatus).To(Equal(fleetv1alpha1.ConfigStatusFailed))
+			Expect(e.LastError).To(Equal("boom"))
+			Expect(e.StatusChangedAt).NotTo(BeNil())
+
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusFailed, "boom"))).To(Succeed())
+			Expect(cc.patches.Load()).To(Equal(int64(2)))
+
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusFailed, "different"))).To(Succeed())
+			Expect(cc.patches.Load()).To(Equal(int64(3)))
+		})
+
+		It("truncates lastError at 1024 bytes", func() {
+			reg, _, _ := setup()
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusFailed, strings.Repeat("x", 3000)))).To(Succeed())
+			Expect(getBinding(bindingName).Status.RegisteredTenants[0].LastError).To(HaveLen(1024))
+		})
+
+		It("leaves the stored status untouched on Register", func() {
+			reg, _, _ := setup()
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusFailed, "boom"))).To(Succeed())
+			before := getBinding(bindingName).Status.RegisteredTenants[0]
+
+			Expect(reg.Register(ctx, info("c2", "status"))).To(Succeed())
+			e := getBinding(bindingName).Status.RegisteredTenants[0]
+			Expect(e.CollectorID).To(Equal("c2"))
+			Expect(e.ConfigStatus).To(Equal(fleetv1alpha1.ConfigStatusFailed))
+			Expect(e.LastError).To(Equal("boom"))
+			Expect(e.StatusChangedAt.Time).To(Equal(before.StatusChangedAt.Time))
+		})
+
+		// Alloy omits the status on polls where it has not changed.
+		It("keeps the stored status on a Heartbeat without a status", func() {
+			reg, _, _ := setup()
+			Expect(reg.Heartbeat(ctx, withStatus(port.ConfigStatusFailed, "boom"))).To(Succeed())
+
+			Expect(reg.Heartbeat(ctx, info("c1", "status"))).To(Succeed())
+			e := getBinding(bindingName).Status.RegisteredTenants[0]
+			Expect(e.ConfigStatus).To(Equal(fleetv1alpha1.ConfigStatusFailed))
+			Expect(e.LastError).To(Equal("boom"))
 		})
 	})
 

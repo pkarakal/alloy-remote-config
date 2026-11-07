@@ -10,7 +10,21 @@ type CollectorInfo struct {
 	ID              string
 	Name            string
 	LocalAttributes map[string]string
+	// ConfigStatus and ConfigError carry the apply status from GetConfig. An
+	// empty ConfigStatus (Register) means "leave the stored status untouched".
+	ConfigStatus ConfigStatus
+	ConfigError  string
 }
+
+// ConfigStatus is the apply status a collector reports for its remote config.
+type ConfigStatus string
+
+const (
+	ConfigStatusUnknown  ConfigStatus = "Unknown"
+	ConfigStatusApplying ConfigStatus = "Applying"
+	ConfigStatusApplied  ConfigStatus = "Applied"
+	ConfigStatusFailed   ConfigStatus = "Failed"
+)
 
 // CollectorRegistry tracks collector registrations.
 type CollectorRegistry interface {

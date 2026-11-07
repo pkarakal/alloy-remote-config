@@ -115,6 +115,8 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
+	r.deriveApplyStatus(groupBinding)
+
 	// Step 5 — Update status
 	groupBinding.Status.BoundPipelineConfigRef = groupBinding.Spec.PipelineConfigRef
 	groupBinding.Status.BoundCollectorGroupRef = groupBinding.Spec.CollectorGroupRef
@@ -207,6 +209,40 @@ func (r *CollectorGroupBindingReconciler) evictStaleTenants(b *fleetv1alpha1.Col
 	}
 	b.Status.RegisteredTenants = kept
 	return before - len(b.Status.RegisteredTenants)
+}
+
+// deriveApplyStatus recomputes the apply counts and last error from the
+// registered tenants. It runs after eviction so stale entries do not count.
+func (r *CollectorGroupBindingReconciler) deriveApplyStatus(b *fleetv1alpha1.CollectorGroupBinding) {
+	var applied, failed int32
+	var latest *fleetv1alpha1.RegisteredTenant
+	for i := range b.Status.RegisteredTenants {
+		t := &b.Status.RegisteredTenants[i]
+		switch t.ConfigStatus {
+		case fleetv1alpha1.ConfigStatusApplied:
+			applied++
+		case fleetv1alpha1.ConfigStatusFailed:
+			failed++
+			if latest == nil || changedAfter(t, latest) {
+				latest = t
+			}
+		}
+	}
+	b.Status.AppliedCount = applied
+	b.Status.FailedCount = failed
+	b.Status.LastApplyError = ""
+	if latest != nil {
+		b.Status.LastApplyError = fleetv1alpha1.TruncateError(latest.LastError)
+	}
+}
+
+// changedAfter reports whether a changed status strictly later than b did; a
+// missing timestamp sorts oldest.
+func changedAfter(a, b *fleetv1alpha1.RegisteredTenant) bool {
+	if a.StatusChangedAt == nil {
+		return false
+	}
+	return b.StatusChangedAt == nil || a.StatusChangedAt.After(b.StatusChangedAt.Time)
 }
 
 // handleDeletion strips the finalizer. Counts are derived by the target
