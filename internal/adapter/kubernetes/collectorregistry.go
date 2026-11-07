@@ -271,48 +271,68 @@ func (r *CollectorRegistry) Unregister(ctx context.Context, id string, scope por
 		return fmt.Errorf("listing CollectorGroupBindings: %w", err)
 	}
 
+	// With additive pipelines one collector can sit on several bindings, so
+	// remove it from every binding that holds it, not just the first.
+	var errs []error
+	removed := 0
 	for i := range list.Items {
 		if indexScopedTenant(list.Items[i].Status.RegisteredTenants, id, scope) < 0 {
 			continue
 		}
-		bindingKey := client.ObjectKeyFromObject(&list.Items[i])
-		for attempt := range maxPatchRetries {
-			if attempt > 0 {
-				sleepJitter(ctx, attempt)
-			}
-			// Always read live: the cached copy is what a conflict proves stale.
-			fresh := &fleetv1alpha1.CollectorGroupBinding{}
-			if err := r.reader.Get(ctx, bindingKey, fresh); err != nil {
-				if apierrors.IsNotFound(err) {
-					return nil
-				}
-				return fmt.Errorf("re-fetching CollectorGroupBinding %q: %w", bindingKey.Name, err)
-			}
-			idx := indexScopedTenant(fresh.Status.RegisteredTenants, id, scope)
-			if idx < 0 {
-				// Already removed by a concurrent call.
-				return nil
-			}
-			base := fresh.DeepCopy()
-			fresh.Status.RegisteredTenants = slices.Delete(fresh.Status.RegisteredTenants, idx, idx+1)
-			patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
-			if patchErr := r.client.Status().Patch(ctx, fresh, patch); patchErr != nil {
-				if apierrors.IsConflict(patchErr) {
-					log.V(1).Info("Conflict unregistering collector, retrying",
-						"collectorID", id, "binding", fresh.Name, "attempt", attempt+1)
-					continue
-				}
-				return fmt.Errorf("patching CollectorGroupBinding %q: %w", fresh.Name, patchErr)
-			}
-			log.Info("Unregistered collector from binding",
-				"collectorID", id, "binding", fresh.Name)
-			return nil
+		ok, err := r.unregisterFrom(ctx, client.ObjectKeyFromObject(&list.Items[i]), id, scope)
+		if err != nil {
+			errs = append(errs, err)
+			continue
 		}
-		return fmt.Errorf("failed to unregister collector %q after %d attempts", id, maxPatchRetries)
+		if ok {
+			removed++
+		}
 	}
 
-	log.V(1).Info("Collector not found in any binding during unregister", "collectorID", id)
-	return nil
+	if removed == 0 && len(errs) == 0 {
+		log.V(1).Info("Collector not found in any binding during unregister", "collectorID", id)
+	}
+	return errors.Join(errs...)
+}
+
+// unregisterFrom removes the collector's entry from one binding, re-reading it
+// live on every attempt. It reports whether an entry was removed.
+func (r *CollectorRegistry) unregisterFrom(
+	ctx context.Context, key client.ObjectKey, id string, scope port.UnregisterScope,
+) (bool, error) {
+	log := logf.FromContext(ctx)
+	for attempt := range maxPatchRetries {
+		if attempt > 0 {
+			sleepJitter(ctx, attempt)
+		}
+		// Always read live: the cached copy is what a conflict proves stale.
+		fresh := &fleetv1alpha1.CollectorGroupBinding{}
+		if err := r.reader.Get(ctx, key, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("re-fetching CollectorGroupBinding %q: %w", key.Name, err)
+		}
+		idx := indexScopedTenant(fresh.Status.RegisteredTenants, id, scope)
+		if idx < 0 {
+			// Already removed by a concurrent call.
+			return false, nil
+		}
+		base := fresh.DeepCopy()
+		fresh.Status.RegisteredTenants = slices.Delete(fresh.Status.RegisteredTenants, idx, idx+1)
+		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+		if patchErr := r.client.Status().Patch(ctx, fresh, patch); patchErr != nil {
+			if apierrors.IsConflict(patchErr) {
+				log.V(1).Info("Conflict unregistering collector, retrying",
+					"collectorID", id, "binding", fresh.Name, "attempt", attempt+1)
+				continue
+			}
+			return false, fmt.Errorf("patching CollectorGroupBinding %q: %w", fresh.Name, patchErr)
+		}
+		log.Info("Unregistered collector from binding", "collectorID", id, "binding", fresh.Name)
+		return true, nil
+	}
+	return false, fmt.Errorf("failed to unregister collector %q from %q after %d attempts", id, key.Name, maxPatchRetries)
 }
 
 // findBindings returns the bindings that should receive the collector's

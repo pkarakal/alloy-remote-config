@@ -262,5 +262,15 @@ var _ = Describe("Additive pipelines and expiry", func() {
 				g.Expect(b.Status.RegisteredTenants[0].ConfigStatus).To(Equal(fleetv1alpha1.ConfigStatusFailed), name)
 			}
 		}).Should(Succeed())
+
+		By("unregistering from every binding that holds the collector")
+		Eventually(func(g Gomega) {
+			g.Expect(registry.Unregister(ctx, "ap-collector", port.UnregisterScope{})).To(Succeed())
+			for _, name := range []string{"ap-base", "ap-debug"} {
+				b := &fleetv1alpha1.CollectorGroupBinding{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, b)).To(Succeed())
+				g.Expect(b.Status.RegisteredTenants).To(BeEmpty(), name)
+			}
+		}).Should(Succeed())
 	})
 })
