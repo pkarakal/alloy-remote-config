@@ -48,8 +48,8 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, pc)
 		if apierrors.IsNotFound(err) {
 			resource := &fleetv1alpha1.PipelineConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec:       fleetv1alpha1.PipelineConfigSpec{Content: configContent},
+				Name: name, Namespace: namespace,
+				Spec: fleetv1alpha1.PipelineConfigSpec{Content: configContent},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			resource.Status.ContentHash = configHash
@@ -62,8 +62,8 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cg)
 		if apierrors.IsNotFound(err) {
 			resource := &fleetv1alpha1.CollectorGroup{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec:       fleetv1alpha1.CollectorGroupSpec{},
+				Name: name, Namespace: namespace,
+				Spec: fleetv1alpha1.CollectorGroupSpec{},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		}
@@ -116,7 +116,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		It("should return no error for a missing CollectorGroupBinding", func() {
 			r := newReconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: "nonexistent", Namespace: namespace},
+				Name: "nonexistent", Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -130,7 +130,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			err := k8sClient.Get(ctx, bindingNN, b)
 			if apierrors.IsNotFound(err) {
 				resource := &fleetv1alpha1.CollectorGroupBinding{
-					ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: namespace},
+					Name: bindingName, Namespace: namespace,
 					Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 						PipelineConfigRef: pipelineConfigName,
 						CollectorGroupRef: collectorGroupName,
@@ -158,11 +158,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createPipelineConfig(pipelineConfigName)
 			createCollectorGroup(collectorGroupName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -217,11 +215,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createPipelineConfig(pipelineConfigName)
 			createCollectorGroup(collectorGroupName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -254,11 +250,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		BeforeEach(func() {
 			createPipelineConfig(pipelineConfigName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					TenantRef:         tenantID,
@@ -293,11 +287,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 	Context("When PipelineConfig is missing", func() {
 		BeforeEach(func() {
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: "nonexistent-pc",
 					CollectorGroupRef: collectorGroupName,
@@ -327,11 +319,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		BeforeEach(func() {
 			createPipelineConfig(pipelineConfigName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: "nonexistent-cg",
@@ -366,11 +356,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createCollectorGroup(collectorGroupName)
 
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -421,11 +409,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createPipelineConfig(pipelineConfigName)
 			createCollectorGroup(collectorGroupName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -484,7 +470,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createCollectorGroup(collectorGroupName)
 
 			b1 := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: namespace},
+				Name: bindingName, Namespace: namespace,
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -493,7 +479,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			Expect(k8sClient.Create(ctx, b1)).To(Succeed())
 
 			b2 := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{Name: otherBindingName, Namespace: namespace},
+				Name: otherBindingName, Namespace: namespace,
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: otherPCName,
 					TenantRef:         tenantID,
@@ -540,7 +526,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		BeforeEach(func() {
 			createPipelineConfig(ttlPCName)
 			b := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{Name: ttlBindingName, Namespace: namespace},
+				Name: ttlBindingName, Namespace: namespace,
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					TenantRef:         "ttl-tenant",
 					PipelineConfigRef: ttlPCName,

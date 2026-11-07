@@ -9,7 +9,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -38,10 +37,8 @@ var _ = Describe("CollectorGroup Controller", func() {
 		It("should return no error for a missing CollectorGroup", func() {
 			reconciler := newReconciler()
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      "nonexistent",
-					Namespace: namespace,
-				},
+				Name:      "nonexistent",
+				Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -54,10 +51,8 @@ var _ = Describe("CollectorGroup Controller", func() {
 			err := k8sClient.Get(ctx, typeNamespacedName, cg)
 			if err != nil {
 				resource := &fleetv1alpha1.CollectorGroup{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: namespace,
-					},
+					Name:      resourceName,
+					Namespace: namespace,
 					Spec: fleetv1alpha1.CollectorGroupSpec{
 						Description: "Test collector group",
 					},
@@ -113,11 +108,9 @@ var _ = Describe("CollectorGroup Controller", func() {
 		BeforeEach(func() {
 			By("creating the CollectorGroup with the finalizer already set")
 			resource := &fleetv1alpha1.CollectorGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       resourceName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupFinalizer},
-				},
+				Name:       resourceName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupSpec{
 					Description: "Test collector group",
 				},

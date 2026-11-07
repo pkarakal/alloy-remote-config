@@ -12,7 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -350,7 +349,7 @@ func (r *CollectorGroupBindingReconciler) enqueueBindingsForPipelineConfig(
 	reqs := make([]reconcile.Request, len(list.Items))
 	for i, b := range list.Items {
 		reqs[i] = reconcile.Request{
-			NamespacedName: types.NamespacedName{Namespace: b.Namespace, Name: b.Name},
+			Namespace: b.Namespace, Name: b.Name,
 		}
 	}
 	return reqs
