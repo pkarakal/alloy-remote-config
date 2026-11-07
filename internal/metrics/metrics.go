@@ -42,10 +42,16 @@ type RPCMetrics struct {
 	// RegistryTruncated counts registrations dropped because a binding reached the
 	// registeredTenants cap.
 	RegistryTruncated prometheus.Counter
+	// StatusReports counts GetConfig calls by the apply status the collector
+	// reported (applied, applying, failed, unknown).
+	StatusReports *prometheus.CounterVec
 }
 
 // rpcLabels are the label names shared by the RPC request counter and duration histogram.
 const labelCode = "code"
+
+// labelUnknown is the status label value for entries without a reported status.
+const labelUnknown = "unknown"
 
 var rpcLabels = []string{"procedure", labelCode}
 
@@ -92,6 +98,14 @@ func NewRPCMetrics() *RPCMetrics {
 			Name:      "registry_truncated_total",
 			Help:      "Total number of tenant registrations dropped because the binding reached the registeredTenants cap.",
 		}),
+		StatusReports: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "config_status_reports_total",
+				Help:      "Total number of GetConfig calls by reported collector apply status. Per replica; aggregate with sum.",
+			},
+			[]string{"status"},
+		),
 	}
 }
 

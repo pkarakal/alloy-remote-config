@@ -577,6 +577,48 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			Expect(second.Status.LastSyncedAt).To(Equal(first.Status.LastSyncedAt))
 		})
 
+		It("derives apply counts and the latest error, ignoring evicted entries", func() {
+			now := time.Now().Truncate(time.Second)
+			at := func(d time.Duration) *metav1.Time { t := metav1.NewTime(now.Add(d)); return &t }
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, b)).To(Succeed())
+			fresh := metav1.NewTime(now)
+			stale := metav1.NewTime(now.Add(-time.Hour))
+			b.Status.RegisteredTenants = []fleetv1alpha1.RegisteredTenant{
+				{ID: "a", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusApplied},
+				{ID: "b", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusApplied},
+				{ID: "c", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusFailed,
+					LastError: "old error", StatusChangedAt: at(-time.Minute)},
+				{ID: "d", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusFailed,
+					LastError: "new error", StatusChangedAt: at(-time.Second)},
+				{ID: "e", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusApplying},
+				{ID: "f", CollectorID: "c", LastSeenAt: stale, ConfigStatus: fleetv1alpha1.ConfigStatusFailed,
+					LastError: "evicted error", StatusChangedAt: at(time.Minute)},
+				{ID: "g", CollectorID: "c", LastSeenAt: stale, ConfigStatus: fleetv1alpha1.ConfigStatusApplied},
+			}
+			Expect(k8sClient.Status().Update(ctx, b)).To(Succeed())
+
+			r := &CollectorGroupBindingReconciler{
+				Client: k8sClient, Scheme: k8sClient.Scheme(), CollectorTTL: 5 * time.Minute,
+			}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			got := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, got)).To(Succeed())
+			Expect(got.Status.RegisteredTenants).To(HaveLen(5))
+			Expect(got.Status.AppliedCount).To(Equal(int32(2)))
+			Expect(got.Status.FailedCount).To(Equal(int32(2)))
+			Expect(got.Status.LastApplyError).To(Equal("new error"))
+
+			// A second reconcile with the new fields populated must not write.
+			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+			again := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, again)).To(Succeed())
+			Expect(again.ResourceVersion).To(Equal(got.ResourceVersion))
+		})
+
 		It("returns RequeueAfter=TTL/2 when live tenants exist", func() {
 			seedTenant(metav1.Now())
 

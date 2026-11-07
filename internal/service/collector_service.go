@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"connectrpc.com/connect"
 	collectorv1 "github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1"
@@ -61,12 +62,17 @@ func (s *CollectorService) GetConfig(
 		"collectorGroup", collectorGroup,
 	)
 
+	status := configStatusFromProto(msg.GetRemoteConfigStatus().GetStatus())
+	s.countStatusReport(status)
+
 	// Heartbeat on every poll so LastSeenAt stays current for TTL eviction;
 	// Alloy only calls RegisterCollector once on startup. The registry throttles
 	// the actual writes.
 	if err := s.registry.Heartbeat(ctx, port.CollectorInfo{
 		ID:              msg.GetId(),
 		LocalAttributes: msg.GetLocalAttributes(),
+		ConfigStatus:    status,
+		ConfigError:     msg.GetRemoteConfigStatus().GetErrorMessage(),
 	}); err != nil {
 		s.countRegistryError("refresh")
 		log.V(1).Info("Could not refresh collector registration during GetConfig",
@@ -94,6 +100,27 @@ func (s *CollectorService) GetConfig(
 		Content: resolved.Content,
 		Hash:    resolved.ContentHash,
 	}), nil
+}
+
+// configStatusFromProto maps the reported enum; UNSET and unknown values become Unknown.
+func configStatusFromProto(st collectorv1.RemoteConfigStatuses) port.ConfigStatus {
+	switch st {
+	case collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_APPLIED:
+		return port.ConfigStatusApplied
+	case collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_APPLYING:
+		return port.ConfigStatusApplying
+	case collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_FAILED:
+		return port.ConfigStatusFailed
+	default:
+		return port.ConfigStatusUnknown
+	}
+}
+
+// countStatusReport increments the status report counter when metrics are enabled.
+func (s *CollectorService) countStatusReport(status port.ConfigStatus) {
+	if s.rpcMetrics != nil && s.rpcMetrics.StatusReports != nil {
+		s.rpcMetrics.StatusReports.WithLabelValues(strings.ToLower(string(status))).Inc()
+	}
 }
 
 // resolveConfig asks the resolver for the winning candidate for these attributes.

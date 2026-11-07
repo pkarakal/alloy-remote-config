@@ -452,6 +452,37 @@ quarter of the collector TTL (one minute when the TTL is `0`). `RegisterCollecto
 - Each binding holds at most 1000 `registeredTenants` entries. A new tenant beyond that is not recorded (logged once per
   binding per process, counted by `alloy_remote_config_registry_truncated_total`); existing entries keep refreshing.
 
+### Collector apply status (new)
+
+Alloy v1.12 and newer report whether it applied the config it fetched (`remote_config_status` on `GetConfig`).
+The operator records this on the tenant's `status.registeredTenants` entry; older Alloy versions report nothing and
+show `Unknown`. The effective config is not stored.
+
+| Field (per entry)  | Meaning                                                                   |
+|--------------------|---------------------------------------------------------------------------|
+| `configStatus`     | `Unknown`, `Applying`, `Applied` or `Failed`                              |
+| `lastError`        | Error from the last `Failed` report, truncated to 1024 bytes              |
+| `statusChangedAt`  | When `configStatus` or `lastError` last changed                           |
+
+The binding derives `status.appliedCount`, `status.failedCount` and `status.lastApplyError` (from the most recently
+changed `Failed` entry), shown as the `Applied` and `Failed` columns:
+
+```
+$ kubectl get collectorgroupbindings
+NAME     PHASE    CONFIG   HASH       APPLIED   FAILED   SYNCED   AGE
+canary   Active   canary   3fa9c1...  4         1        12s      2d
+```
+
+- Counts are per tenant, not per Alloy pod. An entry shows whichever collector wrote last, so one failing pod among
+  several sharing a tenant can be masked by a later healthy report.
+- A status change is written at once, bypassing the heartbeat throttle; an unchanged status keeps the TTL/4 throttle.
+- Alloy also reports `Failed` when `GetConfig` itself fails (for example a server-side `Unavailable` while a config
+  is not ready). It reports `Applied` again after the next successful poll.
+- `RegisterCollector` carries no status and leaves the stored status untouched.
+- Metrics: `alloy_remote_config_config_status_reports_total{status}` is a per-replica counter, aggregate it with `sum`.
+  `alloy_remote_config_registered_tenants_by_status{status}` is derived from the CRDs, so every replica reports the
+  same value: aggregate it with `max`, not `sum`.
+
 ### Default PipelineConfig
 
 The default fallback config is discovered by label, not by name. Apply the well-known label to any `PipelineConfig` to
@@ -482,6 +513,7 @@ The operator exposes Prometheus metrics under the `alloy_remote_config` namespac
 | `alloy_remote_config_config_not_modified_total`    | Counter   | —                   | GetConfig calls returning notModified          |
 | `alloy_remote_config_registry_errors_total` (new)  | Counter   | `op`                | Swallowed registry errors; `op` is `register`, `unregister` or `refresh` |
 | `alloy_remote_config_registry_truncated_total`     | Counter   | —                   | Registrations dropped because a binding hit the 1000-entry `registeredTenants` cap |
+| `alloy_remote_config_config_status_reports_total` (new) | Counter | `status`          | GetConfig calls by reported apply status (`applied`, `applying`, `failed`, `unknown`); per replica, use `sum` |
 
 ### Resolution metrics
 
@@ -500,6 +532,7 @@ The operator exposes Prometheus metrics under the `alloy_remote_config` namespac
 | `alloy_remote_config_collector_group_bindings`   | Gauge | `phase`                  | CollectorGroupBinding count by phase               |
 | `alloy_remote_config_collector_groups`           | Gauge | —                        | Total CollectorGroup count                         |
 | `alloy_remote_config_deletion_blocked_resources` | Gauge | `kind`                   | Resources blocked from deletion by active bindings |
+| `alloy_remote_config_registered_tenants_by_status` (new) | Gauge | `status`          | Registered tenants by apply status; identical on every replica, use `max` not `sum` |
 | `alloy_remote_config_build_info`                 | Gauge | `version`, `goversion`   | Build metadata (value always 1)                    |
 
 A `ServiceMonitor` manifest is included at `config/prometheus/` for Prometheus Operator-based scraping.

@@ -29,6 +29,7 @@ type ResourceCollector struct {
 	descCollectorGroups        *prometheus.Desc
 	descDeletionBlocked        *prometheus.Desc
 	descRegisteredTenants      *prometheus.Desc
+	descTenantsByStatus        *prometheus.Desc
 
 	// ScrapeErrors counts List failures during Collect, partitioned by resource kind.
 	// Registered separately (not emitted by this Collector) so it increments monotonically.
@@ -69,6 +70,12 @@ func NewResourceCollector(reader client.Reader, namespace string) *ResourceColle
 			"Current total number of registered tenant entries across all CollectorGroupBinding resources.",
 			nil, constLabels,
 		),
+		descTenantsByStatus: prometheus.NewDesc(
+			metricsNamespace+"_registered_tenants_by_status",
+			"Current number of registered tenant entries by last reported apply status. "+
+				"Every replica reports the same CRD-derived value; aggregate with max, not sum.",
+			[]string{"status"}, constLabels,
+		),
 
 		ScrapeErrors: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -88,6 +95,7 @@ func (rc *ResourceCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- rc.descCollectorGroups
 	ch <- rc.descDeletionBlocked
 	ch <- rc.descRegisteredTenants
+	ch <- rc.descTenantsByStatus
 }
 
 // Collect queries the informer cache and emits current resource state as gauge metrics.
@@ -213,10 +221,18 @@ func (rc *ResourceCollector) collectRegisteredTenants(ctx context.Context, ch ch
 		return
 	}
 	var total float64
+	byStatus := map[string]float64{"applied": 0, "applying": 0, "failed": 0, labelUnknown: 0}
 	for i := range list.Items {
-		total += float64(len(list.Items[i].Status.RegisteredTenants))
+		tenants := list.Items[i].Status.RegisteredTenants
+		total += float64(len(tenants))
+		for _, t := range tenants {
+			byStatus[statusLabel(t.ConfigStatus)]++
+		}
 	}
 	ch <- prometheus.MustNewConstMetric(rc.descRegisteredTenants, prometheus.GaugeValue, total)
+	for status, count := range byStatus {
+		ch <- prometheus.MustNewConstMetric(rc.descTenantsByStatus, prometheus.GaugeValue, count, status)
+	}
 }
 
 // isConditionTrue returns true if conditions contains a condition of the given type with status True.
@@ -227,4 +243,15 @@ func isConditionTrue(conditions []metav1.Condition, condType string) bool {
 		}
 	}
 	return false
+}
+
+// statusLabel normalises a stored status to a metric label; entries that never
+// reported one count as unknown.
+func statusLabel(s fleetv1alpha1.ConfigStatus) string {
+	switch s {
+	case fleetv1alpha1.ConfigStatusApplied, fleetv1alpha1.ConfigStatusApplying, fleetv1alpha1.ConfigStatusFailed:
+		return strings.ToLower(string(s))
+	default:
+		return labelUnknown
+	}
 }
