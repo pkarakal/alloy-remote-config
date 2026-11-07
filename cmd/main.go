@@ -233,7 +233,8 @@ func main() {
 
 	baseResolver := kubernetesadapter.NewConfigResolver(mgr.GetClient())
 	resolver := kubernetesadapter.NewMetricsConfigResolver(baseResolver, resMetrics)
-	registry := kubernetesadapter.NewKubernetesCollectorRegistry(mgr.GetClient(), namespace)
+	registry := kubernetesadapter.NewKubernetesCollectorRegistry(mgr.GetClient(), mgr.GetAPIReader(), namespace,
+		kubernetesadapter.WithCollectorTTL(collectorTTL), kubernetesadapter.WithMetrics(rpcMetrics))
 	collectorSvc := service.NewCollectorService(resolver, registry, namespace, rpcMetrics)
 
 	mux := http.NewServeMux()

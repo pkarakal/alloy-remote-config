@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,6 +94,9 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, r.Update(ctx, groupBinding)
 	}
 
+	// Snapshot before later steps mutate status, for Step 5 change detection.
+	originalStatus := groupBinding.Status.DeepCopy()
+
 	// Step 3 — Validate refs
 	pipelineConfig, err := r.validateRefs(ctx, groupBinding)
 	if err != nil {
@@ -114,12 +118,19 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 	groupBinding.Status.BoundPipelineConfigRef = groupBinding.Spec.PipelineConfigRef
 	groupBinding.Status.BoundCollectorGroupRef = groupBinding.Spec.CollectorGroupRef
 	groupBinding.Status.ConfigHash = pipelineConfig.Status.ContentHash
-	groupBinding.Status.LastSyncedAt = metav1.Now()
 	groupBinding.Status.Phase = derivePhase(groupBinding.Status.Conditions)
 	groupBinding.Status.ObservedGeneration = groupBinding.Generation
 
-	if err := r.Status().Update(ctx, groupBinding); err != nil {
-		return ctrl.Result{}, err
+	// Skip no-op writes: each status write triggers another reconcile and the
+	// registry already writes this object on heartbeats. LastSyncedAt must not
+	// count as a change or the loop would never settle.
+	desired := groupBinding.Status.DeepCopy()
+	desired.LastSyncedAt = originalStatus.LastSyncedAt
+	if !equality.Semantic.DeepEqual(originalStatus, desired) {
+		groupBinding.Status.LastSyncedAt = metav1.Now()
+		if err := r.Status().Update(ctx, groupBinding); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if r.CollectorTTL > 0 && len(groupBinding.Status.RegisteredTenants) > 0 {
 		return ctrl.Result{RequeueAfter: r.CollectorTTL / 2}, nil

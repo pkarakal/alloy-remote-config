@@ -206,7 +206,7 @@ var _ = Describe("ConfigResolver", func() {
 			wantContent := map[string]string{"pick-bind-a": "content a", "pick-bind-b": "content b"}[winner]
 
 			resolver := NewConfigResolver(mgrClient)
-			registry := NewKubernetesCollectorRegistry(mgrClient, namespace)
+			registry := NewKubernetesCollectorRegistry(mgrClient, k8sClient, namespace)
 			Eventually(func(g Gomega) {
 				resolved, err := resolver.ResolveByTenant(ctx, namespace, "pick-tenant")
 				g.Expect(err).NotTo(HaveOccurred())

@@ -59,11 +59,20 @@ func (f *fakeResolver) ResolveDefault(_ context.Context, _ string) (*port.Resolv
 
 type fakeRegistry struct {
 	registerErr   error
+	heartbeatErr  error
 	unregisterErr error
+	registers     int
+	heartbeats    int
 }
 
 func (f *fakeRegistry) Register(_ context.Context, _ port.CollectorInfo) error {
+	f.registers++
 	return f.registerErr
+}
+
+func (f *fakeRegistry) Heartbeat(_ context.Context, _ port.CollectorInfo) error {
+	f.heartbeats++
+	return f.heartbeatErr
 }
 
 func (f *fakeRegistry) Unregister(_ context.Context, _ string) error {
@@ -217,12 +226,25 @@ var _ = Describe("CollectorService", func() {
 				defaultConfig: &port.ResolvedConfig{Content: "default config", ContentHash: "hash"},
 			}
 			svc := NewCollectorService(resolver, &fakeRegistry{
-				registerErr: errors.New("registry unavailable"),
+				heartbeatErr: errors.New("registry unavailable"),
 			}, "default")
 
 			resp, err := svc.GetConfig(ctx, newGetConfigRequest("", nil))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.Msg.Content).To(Equal("default config"))
+		})
+
+		It("should heartbeat rather than register on each poll", func() {
+			resolver := &fakeResolver{
+				defaultConfig: &port.ResolvedConfig{Content: "c", ContentHash: "h"},
+			}
+			reg := &fakeRegistry{}
+			svc := NewCollectorService(resolver, reg, "default")
+
+			_, err := svc.GetConfig(ctx, newGetConfigRequest("", nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reg.heartbeats).To(Equal(1))
+			Expect(reg.registers).To(BeZero())
 		})
 	})
 

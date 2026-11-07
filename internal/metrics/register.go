@@ -15,6 +15,7 @@ func Register(reg prometheus.Registerer, rpc *RPCMetrics, res *ResolutionMetrics
 		rpc.Served,
 		rpc.NotModified,
 		rpc.RegistryErrors,
+		rpc.RegistryTruncated,
 		res.Total,
 		res.Duration,
 		rc,

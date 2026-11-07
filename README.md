@@ -261,6 +261,17 @@ kubectl get collectorgroupbinding production-binding \
 Entries are evicted by the `CollectorGroupBinding` reconciler after the collector TTL window elapses without a refresh
 (default: `5m`, configurable via `--collector-ttl`). Setting `--collector-ttl=0` disables eviction entirely.
 
+Collectors poll `GetConfig` every minute or so, so refreshing `lastSeenAt` on every poll would turn each poll into an
+API write. Poll refreshes are therefore throttled: an entry is rewritten only when its `lastSeenAt` is older than a
+quarter of the collector TTL (one minute when the TTL is `0`). `RegisterCollector` always writes. As a result:
+
+- `lastSeenAt` has a granularity of about TTL/4, not per poll.
+- An entry is one per tenant, not per collector. It shows the collector that wrote last, so when several collectors
+  share a tenant (for example a clustered Alloy deployment) `collectorId` is whichever of them refreshed the entry most
+  recently.
+- Each binding holds at most 1000 `registeredTenants` entries. A new tenant beyond that is not recorded (logged once per
+  binding per process, counted by `alloy_remote_config_registry_truncated_total`); existing entries keep refreshing.
+
 ### Default PipelineConfig
 
 The default fallback config is discovered by label, not by name. Apply the well-known label to any `PipelineConfig` to
@@ -290,6 +301,7 @@ The operator exposes Prometheus metrics under the `alloy_remote_config` namespac
 | `alloy_remote_config_config_served_total`          | Counter   | —                   | GetConfig calls returning a fresh config body  |
 | `alloy_remote_config_config_not_modified_total`    | Counter   | —                   | GetConfig calls returning notModified          |
 | `alloy_remote_config_registry_errors_total` (new)  | Counter   | `op`                | Swallowed registry errors; `op` is `register`, `unregister` or `refresh` |
+| `alloy_remote_config_registry_truncated_total`     | Counter   | —                   | Registrations dropped because a binding hit the 1000-entry `registeredTenants` cap |
 
 ### Resolution metrics
 
