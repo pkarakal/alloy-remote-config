@@ -12,7 +12,9 @@ import (
 	collectorv1 "github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/port"
 )
 
@@ -236,16 +238,29 @@ var _ = Describe("CollectorService", func() {
 			Expect(resp.Msg).NotTo(BeNil())
 		})
 
-		It("should return CodeInternal when the registry fails", func() {
+		It("should return OK and count the error when the registry fails", func() {
+			m := metrics.NewRPCMetrics()
 			svc := NewCollectorService(&fakeResolver{}, &fakeRegistry{
 				registerErr: errors.New("registry failure"),
-			}, "default")
+			}, "default", m)
 
-			_, err := svc.RegisterCollector(ctx, connect.NewRequest(&collectorv1.RegisterCollectorRequest{
+			resp, err := svc.RegisterCollector(ctx, connect.NewRequest(&collectorv1.RegisterCollectorRequest{
 				Id: "c1",
 			}))
-			Expect(err).To(HaveOccurred())
-			Expect(connectErrCode(err)).To(Equal(connect.CodeInternal))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg).NotTo(BeNil())
+			Expect(testutil.ToFloat64(m.RegistryErrors.WithLabelValues("register"))).To(Equal(1.0))
+		})
+
+		It("should return OK for a collector without a tenant attribute", func() {
+			svc := NewCollectorService(&fakeResolver{}, &fakeRegistry{}, "default")
+
+			resp, err := svc.RegisterCollector(ctx, connect.NewRequest(&collectorv1.RegisterCollectorRequest{
+				Id:              "c1",
+				LocalAttributes: map[string]string{"collector_group": "prod"},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg).NotTo(BeNil())
 		})
 	})
 
@@ -260,16 +275,18 @@ var _ = Describe("CollectorService", func() {
 			Expect(resp.Msg).NotTo(BeNil())
 		})
 
-		It("should return CodeInternal when the registry fails", func() {
+		It("should return OK and count the error when the registry fails", func() {
+			m := metrics.NewRPCMetrics()
 			svc := NewCollectorService(&fakeResolver{}, &fakeRegistry{
 				unregisterErr: errors.New("registry failure"),
-			}, "default")
+			}, "default", m)
 
-			_, err := svc.UnregisterCollector(ctx, connect.NewRequest(&collectorv1.UnregisterCollectorRequest{
+			resp, err := svc.UnregisterCollector(ctx, connect.NewRequest(&collectorv1.UnregisterCollectorRequest{
 				Id: "c1",
 			}))
-			Expect(err).To(HaveOccurred())
-			Expect(connectErrCode(err)).To(Equal(connect.CodeInternal))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg).NotTo(BeNil())
+			Expect(testutil.ToFloat64(m.RegistryErrors.WithLabelValues("unregister"))).To(Equal(1.0))
 		})
 	})
 })

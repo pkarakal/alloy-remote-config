@@ -226,7 +226,10 @@ The `tenant` attribute maps to `tenantRef` lookups; the `collector_group` attrib
 ### Collector registration
 
 When a collector calls `RegisterCollector`, the operator upserts it into `status.registeredTenants` of the matching
-`CollectorGroupBinding`. This provides a live view of which tenants are active and what config they are receiving:
+`CollectorGroupBinding`. Registration is best-effort: `RegisterCollector` and `UnregisterCollector` always return OK
+(Alloy treats a registration error as fatal for remotecfg), failures are logged and counted in
+`alloy_remote_config_registry_errors_total` (new), and collectors without a `tenant` attribute are skipped silently.
+This provides a live view of which tenants are active and what config they are receiving:
 
 ```bash
 # See all registered tenants for a binding
@@ -270,6 +273,7 @@ The operator exposes Prometheus metrics under the `alloy_remote_config` namespac
 | `alloy_remote_config_rpc_request_duration_seconds` | Histogram | `procedure`         | RPC request latency                            |
 | `alloy_remote_config_config_served_total`          | Counter   | —                   | GetConfig calls returning a fresh config body  |
 | `alloy_remote_config_config_not_modified_total`    | Counter   | —                   | GetConfig calls returning notModified          |
+| `alloy_remote_config_registry_errors_total` (new)  | Counter   | `op`                | Swallowed registry errors; `op` is `register`, `unregister` or `refresh` |
 
 ### Resolution metrics
 

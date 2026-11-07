@@ -65,6 +65,7 @@ func (s *CollectorService) GetConfig(
 	// Alloy only calls RegisterCollector once on startup, not on each poll tick,
 	// so piggybacking here is the only way to keep TTL-based eviction accurate.
 	if err := s.refreshActiveTenants(ctx, msg.GetId(), "", msg.GetLocalAttributes()); err != nil {
+		s.countRegistryError("refresh")
 		log.V(1).Info("Could not refresh collector registration during GetConfig",
 			"collectorID", msg.GetId(), "err", err)
 	}
@@ -143,15 +144,24 @@ func (s *CollectorService) RegisterCollector(
 	log := logf.FromContext(ctx)
 	msg := req.Msg
 	if err := s.refreshActiveTenants(ctx, msg.GetId(), msg.GetName(), msg.GetLocalAttributes()); err != nil {
+		// Alloy treats any RegisterCollector error as fatal for remotecfg, so
+		// never fail the RPC; GetConfig keeps refreshing the registration.
+		s.countRegistryError("register")
 		log.Error(err, "Failed to register collector", "id", msg.GetId())
-		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&collectorv1.RegisterCollectorResponse{}), nil
 }
 
+// countRegistryError increments the registry error counter when metrics are enabled.
+func (s *CollectorService) countRegistryError(op string) {
+	if s.rpcMetrics != nil {
+		s.rpcMetrics.RegistryErrors.WithLabelValues(op).Inc()
+	}
+}
+
 // refreshActiveTenants upserts the collector into the matching CollectorGroupBinding's
-// registeredTenants. It is called from both RegisterCollector (explicit registration,
-// errors are fatal) and GetConfig (implicit heartbeat, errors are non-fatal) because
+// registeredTenants. It is called from both RegisterCollector (explicit registration)
+// and GetConfig (implicit heartbeat); callers treat errors as non-fatal because
 // Alloy only calls RegisterCollector once on startup, GetConfig is the only periodic call.
 func (s *CollectorService) refreshActiveTenants(ctx context.Context, id, name string, attrs map[string]string) error {
 	return s.registry.Register(ctx, port.CollectorInfo{
@@ -167,8 +177,9 @@ func (s *CollectorService) UnregisterCollector(
 ) (*connect.Response[collectorv1.UnregisterCollectorResponse], error) {
 	log := logf.FromContext(ctx)
 	if err := s.registry.Unregister(ctx, req.Msg.GetId()); err != nil {
+		// Best-effort for consistency with RegisterCollector; TTL eviction cleans up.
+		s.countRegistryError("unregister")
 		log.Error(err, "Failed to unregister collector", "id", req.Msg.GetId())
-		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&collectorv1.UnregisterCollectorResponse{}), nil
 }
