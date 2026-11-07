@@ -5,6 +5,8 @@ package resolution
 
 import (
 	"slices"
+	"strings"
+	"time"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
 	"github.com/pkarakal/alloy-remote-config/internal/selection"
@@ -48,6 +50,8 @@ type Input struct {
 	Groups     []Group
 	Bindings   []fleetv1alpha1.CollectorGroupBinding
 	HasDefault bool
+	// Now is the clock for expiry. The zero value disables expiry checks.
+	Now time.Time
 }
 
 // Decision is the outcome. Binding is set for tenant and group winners.
@@ -55,6 +59,21 @@ type Decision struct {
 	Kind     Kind
 	Binding  *fleetv1alpha1.CollectorGroupBinding
 	Priority int32
+	// Additives are the Additive bindings that target the collector and have
+	// not expired, sorted by name. They never compete for Binding.
+	Additives []*fleetv1alpha1.CollectorGroupBinding
+}
+
+// IsAdditive reports whether the binding appends to the base instead of
+// competing for it.
+func IsAdditive(b *fleetv1alpha1.CollectorGroupBinding) bool {
+	return b.Spec.Mode == fleetv1alpha1.BindingModeAdditive
+}
+
+// IsExpired reports whether spec.expiresAt is at or before now. A zero now
+// never expires anything.
+func IsExpired(b *fleetv1alpha1.CollectorGroupBinding, now time.Time) bool {
+	return !now.IsZero() && b.Spec.ExpiresAt != nil && !b.Spec.ExpiresAt.After(now)
 }
 
 // EffectivePriority returns spec.priority or the default for the binding kind.
@@ -94,41 +113,56 @@ func Better(a, b *fleetv1alpha1.CollectorGroupBinding) bool {
 	return selection.Older(a, b)
 }
 
-// Resolve picks the top binding candidate. As before, the top candidate
-// decides: callers must not fall through when its PipelineConfig is unusable.
-// With no binding candidates it falls back to the default config.
+// targets reports whether the binding addresses the collector.
+func targets(b *fleetv1alpha1.CollectorGroupBinding, tenant string, members []string) bool {
+	switch {
+	case b.Spec.TenantRef != "":
+		return tenant != "" && b.Spec.TenantRef == tenant
+	case b.Spec.CollectorGroupRef != "":
+		return slices.Contains(members, b.Spec.CollectorGroupRef)
+	}
+	return false
+}
+
+// Resolve picks the top Replace binding. As before, the top candidate decides:
+// callers must not fall through when its PipelineConfig is unusable. Expired
+// bindings are not candidates, so an expired winner falls back to the next one.
+// With no Replace candidate it falls back to the default config. Additive
+// bindings never compete; they are returned in Decision.Additives.
 func Resolve(in Input) Decision {
 	tenant := in.Attrs[AttrTenant]
 	members := Members(in.Attrs, in.Groups)
 
 	var best *fleetv1alpha1.CollectorGroupBinding
+	var additives []*fleetv1alpha1.CollectorGroupBinding
 	for i := range in.Bindings {
 		b := &in.Bindings[i]
-		switch {
-		case b.Spec.TenantRef != "":
-			if tenant == "" || b.Spec.TenantRef != tenant {
-				continue
-			}
-		case b.Spec.CollectorGroupRef != "":
-			if !slices.Contains(members, b.Spec.CollectorGroupRef) {
-				continue
-			}
-		default:
+		if IsExpired(b, in.Now) || !targets(b, tenant, members) {
+			continue
+		}
+		if IsAdditive(b) {
+			additives = append(additives, b)
 			continue
 		}
 		if best == nil || Better(b, best) {
 			best = b
 		}
 	}
-	if best != nil {
-		kind := KindGroup
+	slices.SortFunc(additives, func(a, b *fleetv1alpha1.CollectorGroupBinding) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	d := Decision{Additives: additives}
+	switch {
+	case best != nil:
+		d.Kind = KindGroup
 		if best.Spec.TenantRef != "" {
-			kind = KindTenant
+			d.Kind = KindTenant
 		}
-		return Decision{Kind: kind, Binding: best, Priority: EffectivePriority(best)}
+		d.Binding = best
+		d.Priority = EffectivePriority(best)
+	case in.HasDefault:
+		d.Kind = KindDefault
+		d.Priority = DefaultConfigPriority
 	}
-	if in.HasDefault {
-		return Decision{Kind: KindDefault, Priority: DefaultConfigPriority}
-	}
-	return Decision{}
+	return d
 }

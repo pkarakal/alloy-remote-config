@@ -377,6 +377,93 @@ This example assumes a headless `alloy-cluster` Service selecting `app: alloy` f
 
 ---
 
+### Additive pipelines and binding expiry (new, opt-in)
+
+Both features are optional. Without `spec.mode: Additive` bindings and without `spec.expiresAt`, served content and
+hashes are byte-identical to before.
+
+#### Modes
+
+`CollectorGroupBinding.spec.mode` is `Replace` (the default when unset) or `Additive`.
+
+- `Replace` competes for the base config as described in [Priority](#priority).
+- `Additive` never competes and never affects `Overlap`. Its `PipelineConfig` is appended to the base config of every
+  collector it targets (`tenantRef` equal to the collector's tenant, or `collectorGroupRef` of a group the collector
+  belongs to). Priority is irrelevant for additives.
+
+Additive bindings are appended in binding name order. If no `Replace` binding or default config applies, the additives
+alone are served.
+
+#### Composition format
+
+Alloy loads the response as one document, so the operator appends one block per additive after the unchanged base
+content. For a binding named `debug-logs` the appended text is exactly:
+
+```
+<base content>
+// alloy-remote-config: additive pipeline from CollectorGroupBinding "debug-logs"
+declare "arc_debug_logs" {
+<additive content>
+}
+arc_debug_logs "default" { }
+```
+
+(a blank line precedes the comment, because every block starts with a newline). The label is `arc_` plus the binding name
+with every character outside `[A-Za-z0-9_]` replaced by `_`. If two additives derive the same label, the first by
+name is kept and the others are dropped from that composition; they get `NameCollision=True`. The hash is the SHA-256
+of the composed document. The base components keep their IDs, so Alloy keeps running them when an additive is
+added or removed.
+
+#### Additive content must be self-contained
+
+A `declare` body sees only its own components and arguments. It cannot reference components of the base config, and
+top-level config blocks (`logging`, `tracing`, `http`, `remotecfg`, `livedebugging`) are not allowed inside it. An
+additive pipeline therefore brings its own sources and exporters, for example using `sys.env` or
+`remote.kubernetes.secret` for credentials. There is no wiring into the base pipeline yet.
+
+The operator checks syntax with the Alloy parser and rejects the forbidden blocks listed above. It cannot detect
+references to base components or other load-time errors, so `CompositionValid=True` means "syntactically valid".
+
+- The binding reconciler sets `CompositionValid` on additive bindings. `False` carries the parse error (line numbers
+  count the three wrapper lines that precede your content).
+- At serve time an additive that does not parse is left out; the base is never changed because of an additive. If the
+  composed document still fails to parse, the base is served alone and the operator logs an error once per distinct
+  composed hash.
+- `NameCollision` is evaluated across the namespace, so it can be `True` for two additives that never meet on one
+  collector.
+
+#### Expiry
+
+`spec.expiresAt` (optional, both modes) removes the binding from consideration once the time is reached. The operator
+sets `Expired=True` and requeues at `expiresAt`; the phase is unchanged and the object is never deleted automatically
+(GitOps first, delete it when you are ready). An expired `Replace` binding is not a candidate, so collectors fall back
+to the next candidate. This is a deliberate exception to the "no fallthrough" rule, which only applies to a live
+winner whose `PipelineConfig` is unusable.
+
+Printer columns `Mode` and `Expires` show both fields. The gauge `alloy_remote_config_binding_expires_in_seconds{binding}`
+is emitted only for bindings with an `expiresAt` and goes negative once it has passed.
+
+#### Apply status
+
+A collector registers on its base binding and on every additive binding composed into its config, so `appliedCount`,
+`failedCount` and `lastApplyError` appear on additive bindings too. A `Failed` report for a composed config counts
+against the base binding and every contributing additive. Additives left out at serve time are not counted.
+
+#### Flows
+
+**Canary.** A `Replace` binding with a high priority and an `expiresAt`: the cohort tries the new config, and the
+fleet reverts by itself when the time passes. See `config/samples/fleet_v1alpha1_canary_expiring.yaml`.
+
+**Incident.** An `Additive` debug pipeline for one cohort with a short `expiresAt`: only that cohort gets the extra
+pipeline, and it disappears from the served config after the deadline. See
+`config/samples/fleet_v1alpha1_additive_debug.yaml`.
+
+**Promotion.** When the canary looks good, point the environment group's binding at the new `PipelineConfig`, then
+delete the canary binding (it is not deleted automatically).
+
+Metric `alloy_remote_config_resolution_additive_pipelines` (histogram) observes how many additives were composed into
+each resolved config. The resolution `path` label is `additive` when only additives supply the config.
+
 ## Remote-config API
 
 The operator embeds a [Connect-RPC](https://connectrpc.com/) server that implements the
@@ -606,8 +693,9 @@ The operator exposes Prometheus metrics under the `alloy_remote_config` namespac
 |-----------------------------------------------------------|-----------|-------------------|-----------------------------------------------|
 | `alloy_remote_config_config_resolution_total`             | Counter   | `path`, `outcome` | Resolution requests; `path` is the kind of the winning candidate (`tenant`, `collectorgroup`, `default`) |
 | `alloy_remote_config_config_resolution_duration_seconds`  | Histogram | `path`            | Informer cache lookup latency per step        |
+| `alloy_remote_config_resolution_additive_pipelines` (new) | Histogram | —                 | Additive pipelines composed per resolved config (buckets 0, 1, 2, 3, 5, 8) |
 
-`path` is one of `tenant`, `collectorgroup`, or `default`.
+`path` is one of `tenant`, `collectorgroup`, `default`, or `additive` (only additive bindings supplied the config).
 
 ### Resource metrics
 
@@ -618,6 +706,7 @@ The operator exposes Prometheus metrics under the `alloy_remote_config` namespac
 | `alloy_remote_config_collector_groups`           | Gauge | —                        | Total CollectorGroup count                         |
 | `alloy_remote_config_deletion_blocked_resources` | Gauge | `kind`                   | Resources blocked from deletion by active bindings |
 | `alloy_remote_config_registered_tenants_by_status` (new) | Gauge | `status`          | Registered tenants by apply status; identical on every replica, use `max` not `sum` |
+| `alloy_remote_config_binding_expires_in_seconds` (new) | Gauge | `binding`        | Seconds until `spec.expiresAt`, only for bindings that set one |
 | `alloy_remote_config_build_info`                 | Gauge | `version`, `goversion`   | Build metadata (value always 1)                    |
 
 A `ServiceMonitor` manifest is included at `config/prometheus/` for Prometheus Operator-based scraping.

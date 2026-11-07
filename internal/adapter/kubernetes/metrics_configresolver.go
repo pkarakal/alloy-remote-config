@@ -43,6 +43,9 @@ func (m *MetricsConfigResolver) Resolve(ctx context.Context, namespace string, a
 	outcome := classifyOutcome(err)
 	m.metrics.Total.WithLabelValues(path, outcome).Inc()
 	m.metrics.Duration.WithLabelValues(path, outcome).Observe(elapsed)
+	if result != nil {
+		m.metrics.AdditivePipelines.Observe(float64(len(result.Additives)))
+	}
 
 	return result, err
 }

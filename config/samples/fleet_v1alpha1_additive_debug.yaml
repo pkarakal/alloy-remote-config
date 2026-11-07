@@ -1,0 +1,54 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+
+# Incident flow: append a self-contained debug pipeline to the config of the
+# collectors on cluster c-1 only, and stop serving it after expiresAt. The
+# additive content cannot reference base components and brings its own exporter.
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: alloy-remote-config
+    app.kubernetes.io/managed-by: kustomize
+  name: debug-logs
+spec:
+  content: |
+    local.file_match "debug" {
+      path_targets = [{"__path__" = "/var/log/pods/*/*/*.log"}]
+    }
+
+    loki.source.file "debug" {
+      targets    = local.file_match.debug.targets
+      forward_to = [loki.write.debug.receiver]
+    }
+
+    loki.write "debug" {
+      endpoint {
+        url = sys.env("DEBUG_LOKI_URL")
+      }
+    }
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroup
+metadata:
+  labels:
+    app.kubernetes.io/name: alloy-remote-config
+    app.kubernetes.io/managed-by: kustomize
+  name: cluster-c-1
+spec:
+  description: Collectors running on cluster c-1
+  matchers:
+    - cluster_id="c-1"
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroupBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: alloy-remote-config
+    app.kubernetes.io/managed-by: kustomize
+  name: debug-logs-c-1
+spec:
+  mode: Additive
+  collectorGroupRef: cluster-c-1
+  pipelineConfigRef: debug-logs
+  expiresAt: "2030-01-01T00:00:00Z"

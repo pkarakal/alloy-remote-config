@@ -6,12 +6,16 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/composition"
 	"github.com/pkarakal/alloy-remote-config/internal/controller"
 	"github.com/pkarakal/alloy-remote-config/internal/resolution"
 )
@@ -21,6 +25,8 @@ import (
 // it, so they always agree on which binding wins.
 type bindingSelector struct {
 	reader client.Reader
+	// now is the expiry clock.
+	now func() time.Time
 
 	mu sync.Mutex
 	// compiled caches parsed matchers per CollectorGroup UID and generation.
@@ -33,7 +39,7 @@ type compiledGroup struct {
 }
 
 func newBindingSelector(reader client.Reader) *bindingSelector {
-	return &bindingSelector{reader: reader, compiled: map[types.UID]compiledGroup{}}
+	return &bindingSelector{reader: reader, now: time.Now, compiled: map[types.UID]compiledGroup{}}
 }
 
 // groups lists the namespace's CollectorGroups with their compiled matchers.
@@ -107,7 +113,7 @@ func (s *bindingSelector) candidates(
 }
 
 // decide runs the resolution. hasDefault is consulted lazily, only when no
-// binding applies.
+// Replace binding applies (none targets the collector, or all have expired).
 func (s *bindingSelector) decide(
 	ctx context.Context, namespace string, attrs map[string]string, hasDefault func(context.Context) (bool, error),
 ) (resolution.Decision, error) {
@@ -115,11 +121,48 @@ func (s *bindingSelector) decide(
 	if err != nil {
 		return resolution.Decision{}, err
 	}
-	in := resolution.Input{Attrs: attrs, Groups: groups, Bindings: bindings}
-	if len(bindings) == 0 && hasDefault != nil {
+	in := resolution.Input{Attrs: attrs, Groups: groups, Bindings: bindings, Now: s.now()}
+	d := resolution.Resolve(in)
+	if d.Kind == resolution.KindNone && hasDefault != nil {
 		if in.HasDefault, err = hasDefault(ctx); err != nil {
 			return resolution.Decision{}, err
 		}
+		if in.HasDefault {
+			d = resolution.Resolve(in)
+		}
 	}
-	return resolution.Resolve(in), nil
+	return d, nil
+}
+
+// contribution is an Additive binding that will be composed.
+type contribution struct {
+	binding *fleetv1alpha1.CollectorGroupBinding
+	content string
+}
+
+// contributing keeps the additives that can be composed: their PipelineConfig
+// exists, is reconciled, and parses inside a declare block. Others are skipped
+// silently since they must never affect the base. The result keeps name order.
+func (s *bindingSelector) contributing(
+	ctx context.Context, namespace string, additives []*fleetv1alpha1.CollectorGroupBinding,
+) ([]contribution, error) {
+	out := make([]contribution, 0, len(additives))
+	for _, b := range additives {
+		pc := &fleetv1alpha1.PipelineConfig{}
+		if err := s.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: b.Spec.PipelineConfigRef}, pc); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("fetching PipelineConfig %q for additive binding %q: %w",
+				b.Spec.PipelineConfigRef, b.Name, err)
+		}
+		if pc.Status.ContentHash == "" || strings.TrimSpace(pc.Spec.Content) == "" {
+			continue
+		}
+		if composition.CheckSnippet(pc.Spec.Content) != nil {
+			continue
+		}
+		out = append(out, contribution{binding: b, content: pc.Spec.Content})
+	}
+	return out, nil
 }

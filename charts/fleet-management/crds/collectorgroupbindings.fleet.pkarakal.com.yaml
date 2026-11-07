@@ -21,9 +21,15 @@ spec:
     - jsonPath: .spec.pipelineConfigRef
       name: Config
       type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
     - jsonPath: .status.effectivePriority
       name: Priority
       type: integer
+    - jsonPath: .spec.expiresAt
+      name: Expires
+      type: string
     - jsonPath: .status.configHash
       name: Hash
       type: string
@@ -71,6 +77,22 @@ spec:
                   targets. All collectors that self-identify with this group via
                   their remotecfg attributes will receive the referenced config.
                   Mutually exclusive with TenantRef.
+                type: string
+              expiresAt:
+                description: |-
+                  ExpiresAt is the time after which the binding is no longer a candidate,
+                  in either mode. The object is never deleted automatically.
+                format: date-time
+                type: string
+              mode:
+                description: |-
+                  Mode says how the binding's PipelineConfig combines with others. Replace
+                  (the default when unset) competes for the base config by priority.
+                  Additive never competes: its content is appended to the base config as a
+                  self-contained declare block for every collector it targets.
+                enum:
+                - Replace
+                - Additive
                 type: string
               pipelineConfigRef:
                 description: |-

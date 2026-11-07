@@ -7,4 +7,6 @@ resources:
 - fleet_v1alpha1_collectorgroup.yaml
 - fleet_v1alpha1_collectorgroupbinding.yaml
 - fleet_v1alpha1_canary.yaml
+- fleet_v1alpha1_canary_expiring.yaml
+- fleet_v1alpha1_additive_debug.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

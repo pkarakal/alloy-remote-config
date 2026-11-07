@@ -20,6 +20,7 @@ func Register(reg prometheus.Registerer, rpc *RPCMetrics, res *ResolutionMetrics
 		rpc.TrustedAttrRejections,
 		res.Total,
 		res.Duration,
+		res.AdditivePipelines,
 		rc,
 		rc.ScrapeErrors,
 		bi.Info,

@@ -126,7 +126,13 @@ type ResolutionMetrics struct {
 	Total *prometheus.CounterVec
 	// Duration measures resolution latency per path.
 	Duration *prometheus.HistogramVec
+	// AdditivePipelines observes how many additive pipelines were composed into
+	// each successfully resolved config.
+	AdditivePipelines prometheus.Histogram
 }
+
+// additivePipelineBuckets counts additives per response; most responses have none.
+var additivePipelineBuckets = []float64{0, 1, 2, 3, 5, 8}
 
 // NewResolutionMetrics creates an initialised ResolutionMetrics instance ready to be registered.
 func NewResolutionMetrics() *ResolutionMetrics {
@@ -148,6 +154,12 @@ func NewResolutionMetrics() *ResolutionMetrics {
 			},
 			[]string{"path", "outcome"},
 		),
+		AdditivePipelines: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Name:      "resolution_additive_pipelines",
+			Help:      "Number of additive pipelines composed into each resolved config.",
+			Buckets:   additivePipelineBuckets,
+		}),
 	}
 }
 

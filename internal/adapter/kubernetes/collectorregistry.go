@@ -5,6 +5,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -99,12 +100,13 @@ func NewKubernetesCollectorRegistry(
 	for _, o := range opts {
 		o(r)
 	}
+	r.selector.now = func() time.Time { return r.now() }
 	return r
 }
 
 // Register upserts the tenant identified by info.LocalAttributes["tenant"] into
 // the status.registeredTenants of the matching CollectorGroupBinding, always
-// writing. The binding is the one config resolution picks (see findBinding).
+// writing. The binding is the one config resolution picks (see findBindings).
 // If no binding is found, the call is a no-op; collectors may come online
 // before their bindings are created.
 func (r *CollectorRegistry) Register(ctx context.Context, info port.CollectorInfo) error {
@@ -128,16 +130,32 @@ func (r *CollectorRegistry) upsert(ctx context.Context, info port.CollectorInfo,
 		return nil
 	}
 
-	binding, err := r.findBinding(ctx, info.LocalAttributes)
+	bindings, err := r.findBindings(ctx, info.LocalAttributes)
 	if err != nil {
 		log.Error(err, "Failed to find binding for tenant", "tenant", tenant)
 		return err
 	}
-	if binding == nil {
+	if len(bindings) == 0 {
 		log.V(1).Info("No binding found for tenant, skipping registration",
 			"tenant", tenant, "collectorID", info.ID)
 		return nil
 	}
+	// Record on every binding that shapes the served config, so apply status
+	// reaches the base and each contributing additive.
+	var errs []error
+	for _, binding := range bindings {
+		if err := r.upsertBinding(ctx, binding, tenant, info, throttle); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// upsertBinding writes the tenant entry into one binding's status.
+func (r *CollectorRegistry) upsertBinding(
+	ctx context.Context, binding *fleetv1alpha1.CollectorGroupBinding, tenant string, info port.CollectorInfo, throttle bool,
+) error {
+	log := logf.FromContext(ctx)
 	key := client.ObjectKeyFromObject(binding)
 
 	for attempt := range maxPatchRetries {
@@ -297,17 +315,29 @@ func (r *CollectorRegistry) Unregister(ctx context.Context, id string, scope por
 	return nil
 }
 
-// findBinding returns the CollectorGroupBinding that should receive the
-// collector's registration: the same binding config resolution picks (shared
-// code path), ignoring whether its PipelineConfig is ready.
-func (r *CollectorRegistry) findBinding(
+// findBindings returns the bindings that should receive the collector's
+// registration: the one config resolution picks as base (shared code path,
+// ignoring whether its PipelineConfig is ready) followed by every additive
+// that is composed into the served config.
+func (r *CollectorRegistry) findBindings(
 	ctx context.Context, attrs map[string]string,
-) (*fleetv1alpha1.CollectorGroupBinding, error) {
+) ([]*fleetv1alpha1.CollectorGroupBinding, error) {
 	d, err := r.selector.decide(ctx, r.namespace, attrs, nil)
 	if err != nil {
 		return nil, err
 	}
-	return d.Binding, nil
+	var out []*fleetv1alpha1.CollectorGroupBinding
+	if d.Binding != nil {
+		out = append(out, d.Binding)
+	}
+	contribs, err := r.selector.contributing(ctx, r.namespace, d.Additives)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range contribs {
+		out = append(out, c.binding)
+	}
+	return out, nil
 }
 
 // upsertTenant updates an existing entry matching t.ID or appends a new one.

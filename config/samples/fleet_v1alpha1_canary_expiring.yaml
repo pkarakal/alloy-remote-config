@@ -1,0 +1,20 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+
+# Canary flow: a Replace binding with high priority and an expiry. After
+# expiresAt the cohort falls back to the next candidate on its own; the object
+# is kept until you delete it. To promote, point the environment group's
+# binding at pipelineconfig-sample and delete this one.
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroupBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: alloy-remote-config
+    app.kubernetes.io/managed-by: kustomize
+  name: canary-expiring
+spec:
+  mode: Replace
+  collectorGroupRef: canary-org-1234
+  pipelineConfigRef: pipelineconfig-sample
+  priority: 400
+  expiresAt: "2030-01-01T00:00:00Z"

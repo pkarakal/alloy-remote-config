@@ -232,3 +232,128 @@ var _ = Describe("Resolve", func() {
 		}),
 	)
 })
+
+func additive(b fleetv1alpha1.CollectorGroupBinding) fleetv1alpha1.CollectorGroupBinding {
+	b.Spec.Mode = fleetv1alpha1.BindingModeAdditive
+	return b
+}
+
+func expiring(b fleetv1alpha1.CollectorGroupBinding, at time.Time) fleetv1alpha1.CollectorGroupBinding {
+	t := metav1.NewTime(at)
+	b.Spec.ExpiresAt = &t
+	return b
+}
+
+func names(bs []*fleetv1alpha1.CollectorGroupBinding) []string {
+	out := make([]string, 0, len(bs))
+	for _, b := range bs {
+		out = append(out, b.Name)
+	}
+	return out
+}
+
+var _ = DescribeTable("Additive bindings and expiry",
+	func(in Input, wantKind Kind, wantName string, wantAdditives []string) {
+		d := Resolve(in)
+		Expect(d.Kind).To(Equal(wantKind))
+		if wantName == "" {
+			Expect(d.Binding).To(BeNil())
+		} else {
+			Expect(d.Binding).NotTo(BeNil())
+			Expect(d.Binding.Name).To(Equal(wantName))
+		}
+		Expect(names(d.Additives)).To(Equal(wantAdditives))
+	},
+	Entry("an additive never wins the base, even at higher priority",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				binding("base", 0, "t", "", nil), additive(binding("dbg", 0, "t", "", new(int32(900)))),
+			},
+		}, KindTenant, "base", []string{"dbg"}),
+	Entry("additives only fall back to the default for the base",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch, HasDefault: true,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{additive(binding("dbg", 0, "t", "", nil))},
+		}, KindDefault, "", []string{"dbg"}),
+	Entry("additives only and no default leave no base",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{additive(binding("dbg", 0, "t", "", nil))},
+		}, KindNone, "", []string{"dbg"}),
+	Entry("additives sorted by name",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				additive(binding("b", 0, "t", "", nil)), additive(binding("a", time.Hour, "t", "", nil)),
+			},
+		}, KindNone, "", []string{"a", "b"}),
+	Entry("additive targets a cohort through matchers",
+		Input{
+			Attrs:  map[string]string{"tenant": "t", "cluster_id": "c-1"},
+			Groups: []Group{{Name: "c1", Matchers: mustMatchers(`cluster_id="c-1"`)}},
+			Now:    epoch,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				binding("base", 0, "t", "", nil), additive(binding("dbg", 0, "", "c1", nil)),
+			},
+		}, KindTenant, "base", []string{"dbg"}),
+	Entry("additive for another cohort is ignored",
+		Input{
+			Attrs:  map[string]string{"tenant": "t", "cluster_id": "c-2"},
+			Groups: []Group{{Name: "c1", Matchers: mustMatchers(`cluster_id="c-1"`)}},
+			Now:    epoch,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				binding("base", 0, "t", "", nil), additive(binding("dbg", 0, "", "c1", nil)),
+			},
+		}, KindTenant, "base", []string{}),
+	Entry("additive for another tenant is ignored",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{additive(binding("dbg", 0, "other", "", nil))},
+		}, KindNone, "", []string{}),
+	Entry("expired Replace canary falls back to the next candidate",
+		Input{
+			Attrs: map[string]string{"tenant": "t", "collector_group": "g"}, Now: epoch.Add(time.Hour),
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				expiring(binding("canary", 0, "t", "", new(int32(900))), epoch.Add(time.Minute)),
+				binding("env", 0, "", "g", nil),
+			},
+		}, KindGroup, "env", []string{}),
+	Entry("expired Replace with nothing else falls back to the default",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch.Add(time.Hour), HasDefault: true,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				expiring(binding("canary", 0, "t", "", nil), epoch.Add(time.Minute)),
+			},
+		}, KindDefault, "", []string{}),
+	Entry("a binding is expired exactly at expiresAt",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch.Add(time.Minute), HasDefault: true,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				expiring(binding("canary", 0, "t", "", nil), epoch.Add(time.Minute)),
+			},
+		}, KindDefault, "", []string{}),
+	Entry("not yet expired Replace still wins",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch,
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				expiring(binding("canary", 0, "t", "", nil), epoch.Add(time.Minute)),
+			},
+		}, KindTenant, "canary", []string{}),
+	Entry("expired additive is dropped",
+		Input{
+			Attrs: map[string]string{"tenant": "t"}, Now: epoch.Add(time.Hour),
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				binding("base", 0, "t", "", nil),
+				expiring(additive(binding("dbg", 0, "t", "", nil)), epoch.Add(time.Minute)),
+				additive(binding("keep", 0, "t", "", nil)),
+			},
+		}, KindTenant, "base", []string{"keep"}),
+	Entry("zero clock disables expiry",
+		Input{
+			Attrs: map[string]string{"tenant": "t"},
+			Bindings: []fleetv1alpha1.CollectorGroupBinding{
+				expiring(binding("canary", 0, "t", "", nil), epoch.Add(-time.Hour)),
+			},
+		}, KindTenant, "canary", []string{}),
+)

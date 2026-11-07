@@ -6,6 +6,7 @@ package metrics
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,6 +31,9 @@ type ResourceCollector struct {
 	descDeletionBlocked        *prometheus.Desc
 	descRegisteredTenants      *prometheus.Desc
 	descTenantsByStatus        *prometheus.Desc
+	descExpiresIn              *prometheus.Desc
+
+	now func() time.Time
 
 	// ScrapeErrors counts List failures during Collect, partitioned by resource kind.
 	// Registered separately (not emitted by this Collector) so it increments monotonically.
@@ -43,6 +47,7 @@ func NewResourceCollector(reader client.Reader, namespace string) *ResourceColle
 		reader:    reader,
 		namespace: namespace,
 		log:       logf.Log.WithName("metrics.resource-collector"),
+		now:       time.Now,
 
 		// Gauge names do not carry the _total suffix — that suffix is reserved for counters.
 		descPipelineConfigs: prometheus.NewDesc(
@@ -76,6 +81,12 @@ func NewResourceCollector(reader client.Reader, namespace string) *ResourceColle
 				"Every replica reports the same CRD-derived value; aggregate with max, not sum.",
 			[]string{"status"}, constLabels,
 		),
+		descExpiresIn: prometheus.NewDesc(
+			metricsNamespace+"_binding_expires_in_seconds",
+			"Seconds until spec.expiresAt for bindings that set one; negative once expired. "+
+				"Bounded by the number of bindings with an expiry.",
+			[]string{"binding"}, constLabels,
+		),
 
 		ScrapeErrors: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -96,6 +107,7 @@ func (rc *ResourceCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- rc.descDeletionBlocked
 	ch <- rc.descRegisteredTenants
 	ch <- rc.descTenantsByStatus
+	ch <- rc.descExpiresIn
 }
 
 // Collect queries the informer cache and emits current resource state as gauge metrics.
@@ -158,6 +170,12 @@ func (rc *ResourceCollector) collectCollectorGroupBindings(ctx context.Context, 
 	}
 	for phase, count := range counts {
 		ch <- prometheus.MustNewConstMetric(rc.descCollectorGroupBindings, prometheus.GaugeValue, count, phase)
+	}
+	for i := range list.Items {
+		if exp := list.Items[i].Spec.ExpiresAt; exp != nil {
+			ch <- prometheus.MustNewConstMetric(rc.descExpiresIn, prometheus.GaugeValue,
+				exp.Sub(rc.now()).Seconds(), list.Items[i].Name)
+		}
 	}
 }
 

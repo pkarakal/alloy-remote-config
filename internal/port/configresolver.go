@@ -24,6 +24,8 @@ const (
 	PathTenant         = "tenant"
 	PathCollectorGroup = "collectorgroup"
 	PathDefault        = "default"
+	// PathAdditive is used when only additive bindings supply the config.
+	PathAdditive = "additive"
 )
 
 // ResolvedConfig holds the content and hash of a successfully resolved
@@ -36,6 +38,8 @@ type ResolvedConfig struct {
 	Path string
 	// BindingName is the winning CollectorGroupBinding; empty for the default.
 	BindingName string
+	// Additives names the Additive bindings composed into Content, in name order.
+	Additives []string
 }
 
 // ResolveError carries the winning candidate when resolution fails after one
