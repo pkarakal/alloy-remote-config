@@ -19,6 +19,10 @@ func (r *CollectorRegistry) Register(_ context.Context, _ port.CollectorInfo) er
 	return nil
 }
 
+func (r *CollectorRegistry) Heartbeat(_ context.Context, _ port.CollectorInfo) error {
+	return nil
+}
+
 func (r *CollectorRegistry) Unregister(_ context.Context, _ string) error {
 	return nil
 }

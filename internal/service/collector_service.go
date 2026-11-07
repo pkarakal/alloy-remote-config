@@ -61,10 +61,13 @@ func (s *CollectorService) GetConfig(
 		"collectorGroup", collectorGroup,
 	)
 
-	// Refresh the registration on every poll so LastSeenAt stays current.
-	// Alloy only calls RegisterCollector once on startup, not on each poll tick,
-	// so piggybacking here is the only way to keep TTL-based eviction accurate.
-	if err := s.refreshActiveTenants(ctx, msg.GetId(), "", msg.GetLocalAttributes()); err != nil {
+	// Heartbeat on every poll so LastSeenAt stays current for TTL eviction;
+	// Alloy only calls RegisterCollector once on startup. The registry throttles
+	// the actual writes.
+	if err := s.registry.Heartbeat(ctx, port.CollectorInfo{
+		ID:              msg.GetId(),
+		LocalAttributes: msg.GetLocalAttributes(),
+	}); err != nil {
 		s.countRegistryError("refresh")
 		log.V(1).Info("Could not refresh collector registration during GetConfig",
 			"collectorID", msg.GetId(), "err", err)
@@ -145,7 +148,11 @@ func (s *CollectorService) RegisterCollector(
 ) (*connect.Response[collectorv1.RegisterCollectorResponse], error) {
 	log := logf.FromContext(ctx)
 	msg := req.Msg
-	if err := s.refreshActiveTenants(ctx, msg.GetId(), msg.GetName(), msg.GetLocalAttributes()); err != nil {
+	if err := s.registry.Register(ctx, port.CollectorInfo{
+		ID:              msg.GetId(),
+		Name:            msg.GetName(),
+		LocalAttributes: msg.GetLocalAttributes(),
+	}); err != nil {
 		// Alloy treats any RegisterCollector error as fatal for remotecfg, so
 		// never fail the RPC; GetConfig keeps refreshing the registration.
 		s.countRegistryError("register")
@@ -159,18 +166,6 @@ func (s *CollectorService) countRegistryError(op string) {
 	if s.rpcMetrics != nil {
 		s.rpcMetrics.RegistryErrors.WithLabelValues(op).Inc()
 	}
-}
-
-// refreshActiveTenants upserts the collector into the matching CollectorGroupBinding's
-// registeredTenants. It is called from both RegisterCollector (explicit registration)
-// and GetConfig (implicit heartbeat); callers treat errors as non-fatal because
-// Alloy only calls RegisterCollector once on startup, GetConfig is the only periodic call.
-func (s *CollectorService) refreshActiveTenants(ctx context.Context, id, name string, attrs map[string]string) error {
-	return s.registry.Register(ctx, port.CollectorInfo{
-		ID:              id,
-		Name:            name,
-		LocalAttributes: attrs,
-	})
 }
 
 func (s *CollectorService) UnregisterCollector(

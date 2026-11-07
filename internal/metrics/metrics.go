@@ -39,6 +39,9 @@ type RPCMetrics struct {
 	// RegistryErrors counts collector registry failures that were swallowed to keep
 	// the RPC successful, partitioned by operation (register, unregister, refresh).
 	RegistryErrors *prometheus.CounterVec
+	// RegistryTruncated counts registrations dropped because a binding reached the
+	// registeredTenants cap.
+	RegistryTruncated prometheus.Counter
 }
 
 // rpcLabels are the label names shared by the RPC request counter and duration histogram.
@@ -84,6 +87,11 @@ func NewRPCMetrics() *RPCMetrics {
 			},
 			[]string{"op"},
 		),
+		RegistryTruncated: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Name:      "registry_truncated_total",
+			Help:      "Total number of tenant registrations dropped because the binding reached the registeredTenants cap.",
+		}),
 	}
 }
 

@@ -12,9 +12,13 @@ type CollectorInfo struct {
 	LocalAttributes map[string]string
 }
 
-// CollectorRegistry tracks collector registrations. The current implementation
-// is a no-op; a CRD-backed or database-backed implementation can be added later.
+// CollectorRegistry tracks collector registrations.
 type CollectorRegistry interface {
+	// Register records the collector and always writes (explicit registration).
 	Register(ctx context.Context, info CollectorInfo) error
+	// Heartbeat refreshes liveness on each poll and may skip the write when the
+	// tenant was refreshed recently, so polls do not amplify into API writes.
+	Heartbeat(ctx context.Context, info CollectorInfo) error
+	// Unregister removes the collector.
 	Unregister(ctx context.Context, id string) error
 }

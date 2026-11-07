@@ -555,6 +555,28 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			Expect(b.Status.RegisteredTenants).To(HaveLen(1))
 		})
 
+		It("skips the status write when a reconcile changes nothing", func() {
+			seedTenant(metav1.Now())
+			r := &CollectorGroupBindingReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				CollectorTTL: time.Minute,
+			}
+			// The first reconcile settles status (phase, refs, hash).
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+			first := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, first)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+			second := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, second)).To(Succeed())
+
+			Expect(second.ResourceVersion).To(Equal(first.ResourceVersion))
+			Expect(second.Status.LastSyncedAt).To(Equal(first.Status.LastSyncedAt))
+		})
+
 		It("returns RequeueAfter=TTL/2 when live tenants exist", func() {
 			seedTenant(metav1.Now())
 

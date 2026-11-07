@@ -18,8 +18,8 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 
 	// newRegistry creates a registry backed by the cache-aware mgrClient so
 	// field-index queries work, while Status patches go directly to the API server.
-	newRegistry := func() *CollectorRegistry {
-		return NewKubernetesCollectorRegistry(mgrClient, namespace)
+	newRegistry := func(opts ...RegistryOption) *CollectorRegistry {
+		return NewKubernetesCollectorRegistry(mgrClient, k8sClient, namespace, opts...)
 	}
 
 	makeInfo := func(id, tenant, collectorGroup string) port.CollectorInfo {
