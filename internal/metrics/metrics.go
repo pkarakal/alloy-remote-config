@@ -45,6 +45,9 @@ type RPCMetrics struct {
 	// StatusReports counts GetConfig calls by the apply status the collector
 	// reported (applied, applying, failed, unknown).
 	StatusReports *prometheus.CounterVec
+	// TrustedAttrRejections counts requests whose trusted attribute header was
+	// missing, ambiguous or contradicted the client's attribute.
+	TrustedAttrRejections *prometheus.CounterVec
 }
 
 // rpcLabels are the label names shared by the RPC request counter and duration histogram.
@@ -105,6 +108,14 @@ func NewRPCMetrics() *RPCMetrics {
 				Help:      "Total number of GetConfig calls by reported collector apply status. Per replica; aggregate with sum.",
 			},
 			[]string{"status"},
+		),
+		TrustedAttrRejections: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "trusted_attribute_rejections_total",
+				Help:      "Total number of requests rejected or skipped by the trusted attribute check, by procedure and reason (missing, ambiguous, mismatch).",
+			},
+			[]string{"procedure", "reason"},
 		),
 	}
 }

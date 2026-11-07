@@ -51,6 +51,7 @@ type fakeRegistry struct {
 	registers     int
 	heartbeats    int
 	lastHeartbeat port.CollectorInfo
+	lastScope     port.UnregisterScope
 }
 
 func (f *fakeRegistry) Register(_ context.Context, _ port.CollectorInfo) error {
@@ -64,7 +65,8 @@ func (f *fakeRegistry) Heartbeat(_ context.Context, info port.CollectorInfo) err
 	return f.heartbeatErr
 }
 
-func (f *fakeRegistry) Unregister(_ context.Context, _ string) error {
+func (f *fakeRegistry) Unregister(_ context.Context, _ string, scope port.UnregisterScope) error {
+	f.lastScope = scope
 	return f.unregisterErr
 }
 
@@ -336,6 +338,16 @@ var _ = Describe("CollectorService", func() {
 	})
 
 	Context("UnregisterCollector", func() {
+		It("passes the scope from the context to the registry", func() {
+			reg := &fakeRegistry{}
+			svc := NewCollectorService(&fakeResolver{}, reg, "default")
+			scoped := port.WithUnregisterScope(ctx, port.UnregisterScope{Tenant: "acme"})
+
+			_, err := svc.UnregisterCollector(scoped, connect.NewRequest(&collectorv1.UnregisterCollectorRequest{Id: "c1"}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reg.lastScope).To(Equal(port.UnregisterScope{Tenant: "acme"}))
+		})
+
 		It("should succeed with a no-op registry", func() {
 			svc := NewCollectorService(&fakeResolver{}, &fakeRegistry{}, "default")
 

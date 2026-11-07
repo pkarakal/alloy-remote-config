@@ -23,6 +23,6 @@ func (r *CollectorRegistry) Heartbeat(_ context.Context, _ port.CollectorInfo) e
 	return nil
 }
 
-func (r *CollectorRegistry) Unregister(_ context.Context, _ string) error {
+func (r *CollectorRegistry) Unregister(_ context.Context, _ string, _ port.UnregisterScope) error {
 	return nil
 }
