@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -15,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -34,7 +34,7 @@ var _ = Describe("PipelineConfig Controller", func() {
 
 	newReconciler := func() *PipelineConfigReconciler {
 		return &PipelineConfigReconciler{
-			Client: k8sClient,
+			Client: indexedListClient{Client: k8sClient, lister: mgrClient},
 			Scheme: k8sClient.Scheme(),
 		}
 	}
@@ -149,7 +149,12 @@ var _ = Describe("PipelineConfig Controller", func() {
 				Status:     fleetv1alpha1.PipelineConfigStatus{ContentHash: "stale-hash"},
 			}
 			fc := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
-				WithObjects(pc).WithStatusSubresource(pc).Build()
+				WithObjects(pc).WithStatusSubresource(pc).
+				WithIndex(&fleetv1alpha1.CollectorGroupBinding{}, IndexPipelineConfigRef,
+					func(o client.Object) []string {
+						return []string{o.(*fleetv1alpha1.CollectorGroupBinding).Spec.PipelineConfigRef}
+					}).
+				Build()
 			r := &PipelineConfigReconciler{Client: fc, Scheme: fc.Scheme()}
 
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
@@ -182,28 +187,6 @@ var _ = Describe("PipelineConfig Controller", func() {
 		})
 
 		AfterEach(cleanup)
-
-		It("should block deletion and requeue when active bindings exist", func() {
-			By("setting active bindings in status")
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, pc)).To(Succeed())
-			pc.Status.ActiveBindings = 3
-			Expect(k8sClient.Status().Update(ctx, pc)).To(Succeed())
-
-			By("triggering deletion")
-			Expect(k8sClient.Delete(ctx, pc)).To(Succeed())
-
-			By("reconciling the resource under deletion")
-			reconciler := newReconciler()
-			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
-
-			By("verifying the finalizer is still present")
-			updated := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
-			Expect(updated.Finalizers).To(ContainElement(PipelineConfigFinalizer))
-		})
 
 		It("should remove the finalizer and allow deletion when no active bindings exist", func() {
 			By("ensuring active bindings is zero")

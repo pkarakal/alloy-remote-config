@@ -30,7 +30,7 @@ import (
 
 const (
 	// CollectorGroupBindingFinalizer is the finalizer added to CollectorGroupBinding
-	// resources to ensure proper cleanup of counters on deletion.
+	// resources to that existing objects carry; deletion only removes it.
 	CollectorGroupBindingFinalizer = "fleet.pkarakal.com/collectorgroupbinding-protection"
 
 	// IndexTenantRef is the field index key for spec.tenantRef.
@@ -69,7 +69,7 @@ type CollectorGroupBindingReconciler struct {
 // move the current state of the cluster closer to the desired state.
 func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.Info("Reconciling CollectorGroupBinding")
+	log.V(1).Info("Reconciling CollectorGroupBinding")
 
 	// Step 0 — Fetch
 	groupBinding := &fleetv1alpha1.CollectorGroupBinding{}
@@ -101,11 +101,6 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 
 	// Step 3.5 — Flag bindings that lose to a duplicate target
 	r.setOverlapCondition(ctx, groupBinding)
-
-	// Step 4 — Idempotent counter management
-	if err := r.manageCounters(ctx, groupBinding); err != nil {
-		return ctrl.Result{}, err
-	}
 
 	// Step 4.5 — Evict stale registered tenants
 	if evicted := r.evictStaleTenants(groupBinding); evicted > 0 {
@@ -197,27 +192,9 @@ func (r *CollectorGroupBindingReconciler) evictStaleTenants(b *fleetv1alpha1.Col
 	return before - len(b.Status.RegisteredTenants)
 }
 
-// handleDeletion decrements counters and strips the finalizer.
+// handleDeletion strips the finalizer. Counts are derived by the target
+// reconcilers, so nothing needs to be unwound here.
 func (r *CollectorGroupBindingReconciler) handleDeletion(ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding) error {
-	log := logf.FromContext(ctx)
-	ns := b.Namespace
-
-	if prevPC := b.Status.BoundPipelineConfigRef; prevPC != "" {
-		if err := r.decrementPipelineConfigActiveBindings(ctx, ns, prevPC); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		} else if apierrors.IsNotFound(err) {
-			log.Info("PipelineConfig already deleted, skipping decrement", "name", prevPC)
-		}
-	}
-
-	if prevCG := b.Status.BoundCollectorGroupRef; prevCG != "" {
-		if err := r.decrementCollectorGroupActiveBindings(ctx, ns, prevCG); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		} else if apierrors.IsNotFound(err) {
-			log.Info("CollectorGroup already deleted, skipping decrement", "name", prevCG)
-		}
-	}
-
 	controllerutil.RemoveFinalizer(b, CollectorGroupBindingFinalizer)
 	return r.Update(ctx, b)
 }
@@ -280,43 +257,6 @@ func (r *CollectorGroupBindingReconciler) setRefsInvalid(
 	}
 }
 
-// manageCounters idempotently adjusts PipelineConfig and CollectorGroup
-// activeBindings counters when refs change between reconcile cycles.
-func (r *CollectorGroupBindingReconciler) manageCounters(
-	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
-) error {
-	log := logf.FromContext(ctx)
-	ns := b.Namespace
-	prevPC := b.Status.BoundPipelineConfigRef
-	newPC := b.Spec.PipelineConfigRef
-	prevCG := b.Status.BoundCollectorGroupRef
-	newCG := b.Spec.CollectorGroupRef
-
-	if prevPC != "" && prevPC != newPC {
-		if err := r.decrementPipelineConfigActiveBindings(ctx, ns, prevPC); err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "Failed to decrement old PipelineConfig active bindings", "name", prevPC)
-		}
-	}
-	if prevCG != "" && prevCG != newCG {
-		if err := r.decrementCollectorGroupActiveBindings(ctx, ns, prevCG); err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "Failed to decrement old CollectorGroup active bindings", "name", prevCG)
-		}
-	}
-
-	if prevPC != newPC {
-		if err := r.incrementPipelineConfigActiveBindings(ctx, ns, newPC); err != nil {
-			return err
-		}
-	}
-
-	if prevCG != newCG && newCG != "" {
-		if err := r.incrementCollectorGroupActiveBindings(ctx, ns, newCG); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // derivePhase returns Active, Degraded, or Pending based on the RefsValid condition.
 func derivePhase(conditions []metav1.Condition) fleetv1alpha1.CollectorGroupBindingPhase {
 	refsValid := meta.FindStatusCondition(conditions, fleetv1alpha1.ConditionTypeRefsValid)
@@ -343,50 +283,6 @@ func (r *CollectorGroupBindingReconciler) getCollectorGroup(ctx context.Context,
 	collectorGroup := &fleetv1alpha1.CollectorGroup{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, collectorGroup)
 	return collectorGroup, err
-}
-
-func (r *CollectorGroupBindingReconciler) decrementPipelineConfigActiveBindings(ctx context.Context, namespace, name string) error {
-	log := logf.FromContext(ctx)
-	log.Info("Decrementing PipelineConfig active bindings", "namespace", namespace, "name", name)
-	pipelineConfig, err := r.getPipelineConfig(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-	pipelineConfig.Status.ActiveBindings--
-	return r.Status().Update(ctx, pipelineConfig)
-}
-
-func (r *CollectorGroupBindingReconciler) incrementPipelineConfigActiveBindings(ctx context.Context, namespace, name string) error {
-	log := logf.FromContext(ctx)
-	log.Info("Incrementing PipelineConfig active bindings", "namespace", namespace, "name", name)
-	pipelineConfig, err := r.getPipelineConfig(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-	pipelineConfig.Status.ActiveBindings++
-	return r.Status().Update(ctx, pipelineConfig)
-}
-
-func (r *CollectorGroupBindingReconciler) decrementCollectorGroupActiveBindings(ctx context.Context, namespace, name string) error {
-	log := logf.FromContext(ctx)
-	log.Info("Decrementing CollectorGroup active bindings", "namespace", namespace, "name", name)
-	collectorGroup, err := r.getCollectorGroup(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-	collectorGroup.Status.ActiveBindings--
-	return r.Status().Update(ctx, collectorGroup)
-}
-
-func (r *CollectorGroupBindingReconciler) incrementCollectorGroupActiveBindings(ctx context.Context, namespace, name string) error {
-	log := logf.FromContext(ctx)
-	log.Info("Incrementing CollectorGroup active bindings", "namespace", namespace, "name", name)
-	collectorGroup, err := r.getCollectorGroup(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-	collectorGroup.Status.ActiveBindings++
-	return r.Status().Update(ctx, collectorGroup)
 }
 
 // enqueueBindingsForPipelineConfig maps a PipelineConfig change to reconcile
@@ -467,9 +363,23 @@ func (r *CollectorGroupBindingReconciler) bindingTargetHandler() handler.EventHa
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&fleetv1alpha1.CollectorGroupBinding{}).
+		Watches(
+			&fleetv1alpha1.PipelineConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueBindingsForPipelineConfig),
+		).
+		Watches(&fleetv1alpha1.CollectorGroupBinding{}, r.bindingTargetHandler()).
+		Named("collectorgroupbinding").
+		Complete(r)
+}
+
+// SetupIndexes registers the CollectorGroupBinding field indexes. It must run
+// before any controller setup because several reconcilers list by these keys.
+func SetupIndexes(ctx context.Context, mgr ctrl.Manager) error {
 	indexer := mgr.GetFieldIndexer()
 
-	if err := indexer.IndexField(context.Background(),
+	if err := indexer.IndexField(ctx,
 		&fleetv1alpha1.CollectorGroupBinding{}, IndexTenantRef,
 		func(obj client.Object) []string {
 			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
@@ -482,7 +392,7 @@ func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 		return err
 	}
 
-	if err := indexer.IndexField(context.Background(),
+	if err := indexer.IndexField(ctx,
 		&fleetv1alpha1.CollectorGroupBinding{}, IndexCollectorGroupRef,
 		func(obj client.Object) []string {
 			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
@@ -495,7 +405,7 @@ func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 		return err
 	}
 
-	if err := indexer.IndexField(context.Background(),
+	if err := indexer.IndexField(ctx,
 		&fleetv1alpha1.CollectorGroupBinding{}, IndexPipelineConfigRef,
 		func(obj client.Object) []string {
 			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
@@ -504,14 +414,5 @@ func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 	); err != nil {
 		return err
 	}
-
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&fleetv1alpha1.CollectorGroupBinding{}).
-		Watches(
-			&fleetv1alpha1.PipelineConfig{},
-			handler.EnqueueRequestsFromMapFunc(r.enqueueBindingsForPipelineConfig),
-		).
-		Watches(&fleetv1alpha1.CollectorGroupBinding{}, r.bindingTargetHandler()).
-		Named("collectorgroupbinding").
-		Complete(r)
+	return nil
 }

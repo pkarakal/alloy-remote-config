@@ -115,7 +115,7 @@ spec:
 | `contentHash`    | SHA-256 of `spec.content`. Collectors compare this against their local hash to detect changes. |
 | `activeBindings` | Number of `CollectorGroupBinding` resources currently referencing this config.                 |
 
-Deletion is blocked while `activeBindings > 0`.
+Deletion is blocked while `activeBindings > 0`. The count is derived from the bindings on every reconcile, so it self-heals after drift.
 
 **Empty content is rejected.** `spec.content` must contain at least one non-whitespace character (enforced by
 `minLength` and a CEL rule). Objects stored before this rule keep working through validation ratcheting, which needs
@@ -143,7 +143,7 @@ spec:
 |------------------|-------------------------------------------------------------------------------|
 | `activeBindings` | Number of `CollectorGroupBinding` resources currently referencing this group. |
 
-Deletion is blocked while `activeBindings > 0`.
+Deletion is blocked while `activeBindings > 0`. The count is derived from the bindings on every reconcile, so it self-heals after drift.
 
 ---
 

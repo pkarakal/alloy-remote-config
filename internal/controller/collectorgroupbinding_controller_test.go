@@ -35,7 +35,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 	bindingNN := types.NamespacedName{Name: bindingName, Namespace: namespace}
 	pcNN := types.NamespacedName{Name: pipelineConfigName, Namespace: namespace}
-	cgNN := types.NamespacedName{Name: collectorGroupName, Namespace: namespace}
 
 	newReconciler := func() *CollectorGroupBindingReconciler {
 		return &CollectorGroupBindingReconciler{
@@ -171,7 +170,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		})
 		AfterEach(cleanup)
 
-		It("should set Active phase, RefsValid=True, update counters and status", func() {
+		It("should set Active phase, RefsValid=True and status", func() {
 			r := newReconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
@@ -198,16 +197,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			By("checking ObservedGeneration")
 			Expect(b.Status.ObservedGeneration).To(Equal(b.Generation))
-
-			By("checking PipelineConfig activeBindings incremented")
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
-
-			By("checking CollectorGroup activeBindings incremented")
-			cg := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, cgNN, cg)).To(Succeed())
-			Expect(cg.Status.ActiveBindings).To(Equal(1))
 		})
 	})
 
@@ -228,7 +217,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		})
 		AfterEach(cleanup)
 
-		It("should not double-increment counters on repeated reconcile", func() {
+		It("should keep status stable on repeated reconcile", func() {
 			r := newReconciler()
 
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
@@ -236,14 +225,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
-
-			cg := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, cgNN, cg)).To(Succeed())
-			Expect(cg.Status.ActiveBindings).To(Equal(1))
 		})
 	})
 
@@ -263,7 +244,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		})
 		AfterEach(cleanup)
 
-		It("should set Active phase with no CG counter managed", func() {
+		It("should set Active phase with no bound CollectorGroup", func() {
 			r := newReconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
@@ -277,11 +258,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			By("checking BoundCollectorGroupRef is empty (TenantRef does not manage a CG resource)")
 			Expect(b.Status.BoundCollectorGroupRef).To(BeEmpty())
-
-			By("checking PipelineConfig activeBindings incremented")
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
 		})
 	})
 
@@ -372,15 +348,11 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			deletePipelineConfig(newPCName)
 		})
 
-		It("should decrement old PC and increment new PC", func() {
+		It("should update the bound PipelineConfig ref", func() {
 			r := newReconciler()
 
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
 
 			b := &fleetv1alpha1.CollectorGroupBinding{}
 			Expect(k8sClient.Get(ctx, bindingNN, b)).To(Succeed())
@@ -389,15 +361,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			By("checking old PipelineConfig activeBindings decremented")
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(0))
-
-			By("checking new PipelineConfig activeBindings incremented")
-			newPC := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: newPCName, Namespace: namespace}, newPC)).To(Succeed())
-			Expect(newPC.Status.ActiveBindings).To(Equal(1))
 
 			By("checking BoundPipelineConfigRef updated")
 			Expect(k8sClient.Get(ctx, bindingNN, b)).To(Succeed())
@@ -426,15 +389,11 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			deleteCollectorGroup(collectorGroupName)
 		})
 
-		It("should decrement counters and remove finalizer", func() {
+		It("should remove the finalizer", func() {
 			r := newReconciler()
 
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
 
 			b := &fleetv1alpha1.CollectorGroupBinding{}
 			Expect(k8sClient.Get(ctx, bindingNN, b)).To(Succeed())
@@ -442,15 +401,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			By("checking PipelineConfig activeBindings decremented")
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(0))
-
-			By("checking CollectorGroup activeBindings decremented")
-			cg := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, cgNN, cg)).To(Succeed())
-			Expect(cg.Status.ActiveBindings).To(Equal(0))
 
 			By("checking finalizer removed")
 			updated := &fleetv1alpha1.CollectorGroupBinding{}

@@ -79,13 +79,13 @@ type CollectorGroupBindingStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// BoundPipelineConfigRef tracks the PipelineConfigRef used in the last
-	// successful reconcile. Used to detect ref changes for idempotent
-	// activeBindings counter management.
+	// successful reconcile. Informational only; activeBindings is derived
+	// from the spec refs.
 	BoundPipelineConfigRef string `json:"boundPipelineConfigRef,omitempty"`
 
 	// BoundCollectorGroupRef tracks the CollectorGroupRef used in the last
-	// successful reconcile. Used to detect ref changes for idempotent
-	// activeBindings counter management.
+	// successful reconcile. Informational only; activeBindings is derived
+	// from the spec refs.
 	BoundCollectorGroupRef string `json:"boundCollectorGroupRef,omitempty"`
 
 	// RegisteredTenants is the list of tenants currently registered against

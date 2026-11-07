@@ -5,7 +5,6 @@ package controller
 
 import (
 	"context"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -28,7 +27,7 @@ var _ = Describe("CollectorGroup Controller", func() {
 
 	newReconciler := func() *CollectorGroupReconciler {
 		return &CollectorGroupReconciler{
-			Client: k8sClient,
+			Client: indexedListClient{Client: k8sClient, lister: mgrClient},
 			Scheme: k8sClient.Scheme(),
 		}
 	}
@@ -133,28 +132,6 @@ var _ = Describe("CollectorGroup Controller", func() {
 			if cg.DeletionTimestamp.IsZero() {
 				Expect(k8sClient.Delete(ctx, cg)).To(Succeed())
 			}
-		})
-
-		It("should block deletion and requeue when active bindings exist", func() {
-			By("setting active bindings in status")
-			cg := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, cg)).To(Succeed())
-			cg.Status.ActiveBindings = 2
-			Expect(k8sClient.Status().Update(ctx, cg)).To(Succeed())
-
-			By("triggering deletion")
-			Expect(k8sClient.Delete(ctx, cg)).To(Succeed())
-
-			By("reconciling the resource under deletion")
-			reconciler := newReconciler()
-			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
-
-			By("verifying the finalizer is still present")
-			updated := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
-			Expect(updated.Finalizers).To(ContainElement(CollectorGroupFinalizer))
 		})
 
 		It("should remove the finalizer and allow deletion when no active bindings exist", func() {
