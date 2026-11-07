@@ -36,6 +36,9 @@ type RPCMetrics struct {
 	Served prometheus.Counter
 	// NotModified counts GetConfig calls where the collector's hash matched the current config.
 	NotModified prometheus.Counter
+	// RegistryErrors counts collector registry failures that were swallowed to keep
+	// the RPC successful, partitioned by operation (register, unregister, refresh).
+	RegistryErrors *prometheus.CounterVec
 }
 
 // rpcLabels are the label names shared by the RPC request counter and duration histogram.
@@ -73,6 +76,14 @@ func NewRPCMetrics() *RPCMetrics {
 			Name:      "config_not_modified_total",
 			Help:      "Total number of GetConfig calls where the collector's hash matched the current configuration (304-equivalent).",
 		}),
+		RegistryErrors: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "registry_errors_total",
+				Help:      "Total number of collector registry errors that did not fail the RPC, partitioned by operation.",
+			},
+			[]string{"op"},
+		),
 	}
 }
 

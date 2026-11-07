@@ -47,7 +47,10 @@ func (r *CollectorRegistry) Register(ctx context.Context, info port.CollectorInf
 
 	tenant := info.LocalAttributes["tenant"]
 	if tenant == "" {
-		return fmt.Errorf("collector %q has no tenant attribute; skipping registration", info.ID)
+		// Group-only collectors are valid; there is no tenant entry to record.
+		log.V(1).Info("Collector has no tenant attribute, skipping registration",
+			"collectorID", info.ID)
+		return nil
 	}
 	collectorGroup := info.LocalAttributes["collector_group"]
 

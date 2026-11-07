@@ -103,10 +103,23 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 		})
 
 		Context("when the tenant attribute is empty", func() {
-			It("returns an error", func() {
+			It("returns nil and writes nothing", func() {
+				const bindingName = "reg-no-tenant-binding"
+				makeBinding(bindingName, "", "no-tenant-group")
+				DeferCleanup(deleteBinding, bindingName)
+
 				reg := newRegistry()
-				info := port.CollectorInfo{ID: "collector-4", LocalAttributes: map[string]string{}}
-				Expect(reg.Register(ctx, info)).To(HaveOccurred())
+				info := port.CollectorInfo{
+					ID:              "collector-4",
+					LocalAttributes: map[string]string{"collector_group": "no-tenant-group"},
+				}
+				Expect(reg.Register(ctx, info)).To(Succeed())
+
+				Consistently(func(g Gomega) {
+					got := &fleetv1alpha1.CollectorGroupBinding{}
+					g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bindingName, Namespace: namespace}, got)).To(Succeed())
+					g.Expect(got.Status.RegisteredTenants).To(BeEmpty())
+				}, "1s", "250ms").Should(Succeed())
 			})
 		})
 
