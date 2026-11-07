@@ -27,29 +27,16 @@ type fakeResolver struct {
 	err              error
 }
 
-func (f *fakeResolver) ResolveByTenant(_ context.Context, _, tenant string) (*port.ResolvedConfig, error) {
+// Resolve emulates the real resolver's outcome: tenant, then group, then default.
+func (f *fakeResolver) Resolve(_ context.Context, _ string, attrs map[string]string) (*port.ResolvedConfig, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	if rc, ok := f.byTenant[tenant]; ok {
+	if rc, ok := f.byTenant[attrs["tenant"]]; ok && attrs["tenant"] != "" {
 		return rc, nil
 	}
-	return nil, port.ErrConfigNotFound
-}
-
-func (f *fakeResolver) ResolveByCollectorGroup(_ context.Context, _, group string) (*port.ResolvedConfig, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	if rc, ok := f.byCollectorGroup[group]; ok {
+	if rc, ok := f.byCollectorGroup[attrs["collector_group"]]; ok && attrs["collector_group"] != "" {
 		return rc, nil
-	}
-	return nil, port.ErrConfigNotFound
-}
-
-func (f *fakeResolver) ResolveDefault(_ context.Context, _ string) (*port.ResolvedConfig, error) {
-	if f.err != nil {
-		return nil, f.err
 	}
 	if f.defaultConfig != nil {
 		return f.defaultConfig, nil

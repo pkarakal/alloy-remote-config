@@ -6,4 +6,5 @@ resources:
 - fleet_v1alpha1_pipelineconfig.yaml
 - fleet_v1alpha1_collectorgroup.yaml
 - fleet_v1alpha1_collectorgroupbinding.yaml
+- fleet_v1alpha1_canary.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

@@ -8,8 +8,11 @@ import (
 	"time"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/resolution"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -78,6 +81,7 @@ func (r *CollectorGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 	cg.Status.ActiveBindings = active
+	setMatchersCondition(cg)
 	cg.Status.ObservedGeneration = cg.Generation
 	if !apiequality.Semantic.DeepEqual(orig.Status, cg.Status) {
 		if err := r.Status().Update(ctx, cg); err != nil {
@@ -88,6 +92,29 @@ func (r *CollectorGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	log.V(1).Info("CollectorGroup reconciled successfully")
 	return ctrl.Result{}, nil
+}
+
+// setMatchersCondition compiles spec.matchers and records MatchersValid. The
+// condition only exists while matchers are present, so groups that do not use
+// them see no status change.
+func setMatchersCondition(cg *fleetv1alpha1.CollectorGroup) {
+	if len(cg.Spec.Matchers) == 0 {
+		meta.RemoveStatusCondition(&cg.Status.Conditions, fleetv1alpha1.ConditionTypeMatchersValid)
+		return
+	}
+	cond := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeMatchersValid,
+		Status:             metav1.ConditionTrue,
+		Reason:             "MatchersCompiled",
+		Message:            "All matchers compiled",
+		ObservedGeneration: cg.Generation,
+	}
+	if _, err := resolution.ParseMatchers(cg.Spec.Matchers); err != nil {
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "InvalidMatcher"
+		cond.Message = err.Error() + "; only collector_group membership applies"
+	}
+	meta.SetStatusCondition(&cg.Status.Conditions, cond)
 }
 
 // countBindings derives the number of CollectorGroupBindings referencing cg

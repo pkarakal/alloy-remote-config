@@ -29,6 +29,9 @@ When a collector polls for its config, resolution is first-match in priority ord
 2. Exact `collectorGroupRef` match: a binding targeting the collector's group
 3. Default fallback: a `PipelineConfig` labelled `fleet.pkarakal.com/default-pipeline-config: "true"` in the watched namespace
 
+This is the default order. Optional [matcher cohorts and binding priority](#matcher-cohorts-and-binding-priority-new-opt-in)
+rank all applicable bindings by priority instead; with neither set, the order is unchanged.
+
 ---
 
 ## Architecture
@@ -142,6 +145,7 @@ spec:
 | Field            | Description                                                                   |
 |------------------|-------------------------------------------------------------------------------|
 | `activeBindings` | Number of `CollectorGroupBinding` resources currently referencing this group. |
+| `conditions`     | `MatchersValid`, only when `spec.matchers` is set (see below).                |
 
 Deletion is blocked while `activeBindings > 0`. The count is derived from the bindings on every reconcile, so it self-heals after drift.
 
@@ -182,6 +186,7 @@ spec:
 | `configHash`        | Hash of the `PipelineConfig` content currently being served                                                                                                                                                                                                                      |
 | `lastSyncedAt`      | Time of the last successful reconcile                                                                                                                                                                                                                                            |
 | `conditions`        | `RefsValid` — whether all referenced resources exist; `Overlap` — see below                                                                                                                                                                                                                             |
+| `effectivePriority` | `spec.priority`, or 200 (tenant) / 100 (group) when unset                                                                                                                                                                                                                        |
 | `registeredTenants` | List of tenants currently registered to this binding. Each entry contains the tenant `id`, the collector instance `collectorId`, and a `lastSeenAt` timestamp. Entries are upserted on `RegisterCollector` and evicted after the collector TTL window elapses without a refresh. |
 
 **Dangling references.** If the binding chosen for a tenant or group points at a `PipelineConfig` that does not exist,
@@ -191,9 +196,184 @@ spec:
 oldest by `metadata.creationTimestamp` wins, then the lowest name. The same rule applies to multiple default-labeled
 `PipelineConfig` resources, and the config resolver and collector registry always pick the same binding.
 
-**Overlap condition.** A binding that loses to another binding with the same target gets `Overlap=True` with reason
+**Overlap condition.** A binding that loses to another binding with the same target and the same effective priority gets `Overlap=True` with reason
 `DuplicateTarget` and a message naming the winner. Other bindings get `Overlap=False`. The phase is not affected, and
 the condition clears when the winner is deleted or retargeted.
+
+### Matcher cohorts and binding priority (new, opt-in)
+
+Both features are optional. Without `spec.matchers` and `spec.priority` anywhere, resolution is exactly the
+tenant, then group, then default order described above.
+
+#### Matchers
+
+A `CollectorGroup` can select members by collector attributes, in addition to the legacy rule (the collector sets
+`collector_group` to the group's name). A collector is a member of group `G` if either holds.
+
+```yaml
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroup
+metadata:
+  name: canary-org-1234
+spec:
+  matchers:
+    - org_id="org-1234"
+    - cluster_id=~"c-1|c-2"
+```
+
+Each item is `key OP "value"` (at most 16 items, 200 characters each). Keys may contain dots, so Alloy's built-in
+`collector.os` and `collector.version` attributes work. Alloy always sends both of them, on top of the attributes you set.
+
+| Operator | Meaning                  | Missing attribute (treated as `""`)       |
+|----------|--------------------------|-------------------------------------------|
+| `=`      | equals                   | matches only `key=""`                     |
+| `!=`     | does not equal           | matches (`env!="prod"` matches no `env`)  |
+| `=~`     | regex matches            | matches only if the regex matches `""`    |
+| `!~`     | regex does not match     | matches unless the regex matches `""`     |
+
+- Regexes are fully anchored (`^(?:re)$`), so `c-1|c-2` does not match `c-22`.
+- The value is a Go-quoted string, so write `\\.` for a literal dot in a regex.
+- All matchers of a group must match (AND).
+- The `CollectorGroup` reconciler sets the `MatchersValid` condition when matchers are present. If a matcher does not
+  compile (for example a bad regex), the condition is `False` with the error and the group contributes only legacy
+  membership.
+
+#### Priority
+
+`CollectorGroupBinding.spec.priority` (optional, 0 to 1000) ranks bindings that apply to the same collector. The
+highest effective priority wins, then the oldest `creationTimestamp`, then the lowest name. The top candidate
+decides: if its `PipelineConfig` is missing or not ready the answer is `Unavailable`, with no fallthrough.
+
+| Candidate                       | Default effective priority |
+|---------------------------------|----------------------------|
+| Tenant binding (`tenantRef`)    | 200                        |
+| Group binding (`collectorGroupRef`) | 100                    |
+| Default `PipelineConfig`        | 0                          |
+
+The defaults reproduce the previous order. `status.effectivePriority` shows the value in use (printer column
+`Priority`). The default config is only used when no binding applies.
+
+`Overlap=True` now means another binding with the same target (same `tenantRef` or same `collectorGroupRef`) has the
+same effective priority and wins the tie-break. Different priorities are an explicit ranking, not an overlap. Overlaps
+between different groups that match the same collector through matchers are not detected; rank them with priority.
+
+#### Canary example
+
+Send org-1234's collectors on clusters `c-1` and `c-2` a canary config, ahead of any tenant binding:
+
+```yaml
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroupBinding
+metadata:
+  name: canary-org-1234
+spec:
+  collectorGroupRef: canary-org-1234
+  pipelineConfigRef: my-pipeline-canary
+  priority: 300
+```
+
+Collectors outside the cohort keep resolving as before. A copy of this pair is in
+`config/samples/fleet_v1alpha1_canary.yaml`.
+
+#### Alloy Deployment example
+
+Clustering enabled, `loki.source.kubernetes` for pod logs, and a `remotecfg` block whose attributes feed the matchers.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+data:
+  config.alloy: |
+    discovery.kubernetes "pods" {
+      role = "pod"
+    }
+
+    loki.source.kubernetes "pods" {
+      targets    = discovery.kubernetes.pods.targets
+      forward_to = []
+      clustering {
+        enabled = true
+      }
+    }
+
+    remotecfg {
+      url            = "http://alloy-remote-config.default.svc:8080"
+      id             = sys.env("HOSTNAME")
+      poll_frequency = "1m"
+      attributes = {
+        "cluster_id" = "c-1",
+        "env"        = "prod",
+        "tenant"     = "acme",
+        "org_id"     = "org-1234",
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: alloy
+  template:
+    metadata:
+      labels:
+        app: alloy
+    spec:
+      serviceAccountName: alloy
+      containers:
+        - name: alloy
+          image: grafana/alloy:latest
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --cluster.enabled=true
+            - --cluster.join-addresses=alloy-cluster.default.svc
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-config
+```
+
+This example assumes a headless `alloy-cluster` Service selecting `app: alloy` for peer discovery, and that the
+`remotecfg` URL matches your Service. Adjust both to your install.
 
 ---
 
@@ -307,7 +487,7 @@ The operator exposes Prometheus metrics under the `alloy_remote_config` namespac
 
 | Metric                                                    | Type      | Labels            | Description                                   |
 |-----------------------------------------------------------|-----------|-------------------|-----------------------------------------------|
-| `alloy_remote_config_config_resolution_total`             | Counter   | `path`, `outcome` | Resolution attempts per lookup step           |
+| `alloy_remote_config_config_resolution_total`             | Counter   | `path`, `outcome` | Resolution requests; `path` is the kind of the winning candidate (`tenant`, `collectorgroup`, `default`) |
 | `alloy_remote_config_config_resolution_duration_seconds`  | Histogram | `path`            | Informer cache lookup latency per step        |
 
 `path` is one of `tenant`, `collectorgroup`, or `default`.

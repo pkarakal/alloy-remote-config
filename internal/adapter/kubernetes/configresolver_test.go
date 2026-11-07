@@ -66,7 +66,7 @@ var _ = Describe("ConfigResolver", func() {
 		Expect(k8sClient.Create(ctx, binding)).To(Succeed())
 	}
 
-	Context("ResolveByTenant", func() {
+	Context("tenant binding", func() {
 		AfterEach(func() {
 			cleanup("tenant-pc", "tenant-binding")
 		})
@@ -77,7 +77,7 @@ var _ = Describe("ConfigResolver", func() {
 
 			resolver := NewConfigResolver(mgrClient)
 			Eventually(func(g Gomega) {
-				resolved, err := resolver.ResolveByTenant(ctx, namespace, "my-tenant")
+				resolved, err := resolver.Resolve(ctx, namespace, map[string]string{"tenant": "my-tenant"})
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(resolved.Content).To(Equal("tenant pipeline content"))
 				g.Expect(resolved.ContentHash).NotTo(BeEmpty())
@@ -86,12 +86,12 @@ var _ = Describe("ConfigResolver", func() {
 
 		It("should return ErrConfigNotFound for unknown tenant", func() {
 			resolver := NewConfigResolver(mgrClient)
-			_, err := resolver.ResolveByTenant(ctx, namespace, "nonexistent-tenant")
+			_, err := resolver.Resolve(ctx, namespace, map[string]string{"tenant": "nonexistent-tenant"})
 			Expect(err).To(MatchError(port.ErrConfigNotFound))
 		})
 	})
 
-	Context("ResolveByCollectorGroup", func() {
+	Context("collector group binding", func() {
 		AfterEach(func() {
 			cleanup("group-pc", "group-binding")
 		})
@@ -102,7 +102,7 @@ var _ = Describe("ConfigResolver", func() {
 
 			resolver := NewConfigResolver(mgrClient)
 			Eventually(func(g Gomega) {
-				resolved, err := resolver.ResolveByCollectorGroup(ctx, namespace, "my-group")
+				resolved, err := resolver.Resolve(ctx, namespace, map[string]string{"collector_group": "my-group"})
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(resolved.Content).To(Equal("group pipeline content"))
 			}).Should(Succeed())
@@ -110,12 +110,12 @@ var _ = Describe("ConfigResolver", func() {
 
 		It("should return ErrConfigNotFound for unknown collector group", func() {
 			resolver := NewConfigResolver(mgrClient)
-			_, err := resolver.ResolveByCollectorGroup(ctx, namespace, "nonexistent-group")
+			_, err := resolver.Resolve(ctx, namespace, map[string]string{"collector_group": "nonexistent-group"})
 			Expect(err).To(MatchError(port.ErrConfigNotFound))
 		})
 	})
 
-	Context("ResolveDefault", func() {
+	Context("default", func() {
 		AfterEach(func() {
 			cleanup("default", "default-unreconciled")
 		})
@@ -126,7 +126,7 @@ var _ = Describe("ConfigResolver", func() {
 
 			resolver := NewConfigResolver(mgrClient)
 			Eventually(func(g Gomega) {
-				resolved, err := resolver.ResolveDefault(ctx, namespace)
+				resolved, err := resolver.Resolve(ctx, namespace, nil)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(resolved.Content).To(Equal("default pipeline content"))
 			}).Should(Succeed())
@@ -134,7 +134,7 @@ var _ = Describe("ConfigResolver", func() {
 
 		It("should return ErrConfigNotFound when no default exists", func() {
 			resolver := NewConfigResolver(mgrClient)
-			_, err := resolver.ResolveDefault(ctx, namespace)
+			_, err := resolver.Resolve(ctx, namespace, nil)
 			Expect(err).To(MatchError(port.ErrConfigNotFound))
 		})
 
@@ -151,7 +151,7 @@ var _ = Describe("ConfigResolver", func() {
 
 			resolver := NewConfigResolver(mgrClient)
 			Eventually(func(g Gomega) {
-				_, err := resolver.ResolveDefault(ctx, namespace)
+				_, err := resolver.Resolve(ctx, namespace, nil)
 				g.Expect(err).To(MatchError(port.ErrConfigNotReady))
 			}).Should(Succeed())
 		})
@@ -167,7 +167,7 @@ var _ = Describe("ConfigResolver", func() {
 
 			resolver := NewConfigResolver(mgrClient)
 			Eventually(func(g Gomega) {
-				_, err := resolver.ResolveByTenant(ctx, namespace, "dangling-tenant")
+				_, err := resolver.Resolve(ctx, namespace, map[string]string{"tenant": "dangling-tenant"})
 				g.Expect(err).To(MatchError(port.ErrConfigNotReady))
 				g.Expect(err.Error()).To(ContainSubstring("does-not-exist"))
 			}).Should(Succeed())
@@ -208,11 +208,11 @@ var _ = Describe("ConfigResolver", func() {
 			resolver := NewConfigResolver(mgrClient)
 			registry := NewKubernetesCollectorRegistry(mgrClient, k8sClient, namespace)
 			Eventually(func(g Gomega) {
-				resolved, err := resolver.ResolveByTenant(ctx, namespace, "pick-tenant")
+				resolved, err := resolver.Resolve(ctx, namespace, map[string]string{"tenant": "pick-tenant"})
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(resolved.Content).To(Equal(wantContent))
 
-				found, err := registry.findBinding(ctx, "pick-tenant", "")
+				found, err := registry.findBinding(ctx, map[string]string{"tenant": "pick-tenant"})
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(found).NotTo(BeNil())
 				g.Expect(found.Name).To(Equal(winner))
@@ -236,7 +236,7 @@ var _ = Describe("ConfigResolver", func() {
 			resolver := NewConfigResolver(mgrClient)
 			Eventually(func(g Gomega) {
 				for range 5 {
-					resolved, err := resolver.ResolveDefault(ctx, namespace)
+					resolved, err := resolver.Resolve(ctx, namespace, nil)
 					g.Expect(err).NotTo(HaveOccurred())
 					g.Expect(resolved.Content).To(Equal(names[winner]))
 				}

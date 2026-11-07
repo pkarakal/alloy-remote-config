@@ -13,8 +13,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
-	"github.com/pkarakal/alloy-remote-config/internal/controller"
 	"github.com/pkarakal/alloy-remote-config/internal/port"
+	"github.com/pkarakal/alloy-remote-config/internal/resolution"
 	"github.com/pkarakal/alloy-remote-config/internal/selection"
 )
 
@@ -22,7 +22,8 @@ import (
 // informer cache. It relies on field indexes registered by the
 // CollectorGroupBinding controller.
 type ConfigResolver struct {
-	client client.Reader
+	client   client.Reader
+	selector *bindingSelector
 }
 
 var _ port.ConfigResolver = (*ConfigResolver)(nil)
@@ -30,19 +31,43 @@ var _ port.ConfigResolver = (*ConfigResolver)(nil)
 // NewConfigResolver creates a ConfigResolver backed by the given client.Reader
 // (typically mgr.GetClient(), which reads from the informer cache).
 func NewConfigResolver(c client.Reader) *ConfigResolver {
-	return &ConfigResolver{client: c}
+	return &ConfigResolver{client: c, selector: newBindingSelector(c)}
 }
 
-func (r *ConfigResolver) ResolveByTenant(ctx context.Context, namespace, tenant string) (*port.ResolvedConfig, error) {
-	return r.resolveByIndex(ctx, namespace, controller.IndexTenantRef, tenant)
+// Resolve ranks the tenant bindings, the bindings of every group the collector
+// belongs to, and the default config; the winner decides.
+func (r *ConfigResolver) Resolve(ctx context.Context, namespace string, attrs map[string]string) (*port.ResolvedConfig, error) {
+	var defaults []fleetv1alpha1.PipelineConfig
+	decision, err := r.selector.decide(ctx, namespace, attrs, func(ctx context.Context) (bool, error) {
+		var err error
+		defaults, err = r.listDefaults(ctx, namespace)
+		return len(defaults) > 0, err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	switch decision.Kind {
+	case resolution.KindTenant, resolution.KindGroup:
+		return r.resolveBinding(ctx, namespace, decision)
+	case resolution.KindDefault:
+		chosen := selection.Pick(defaults)
+		if len(defaults) > 1 {
+			logf.FromContext(ctx).Info("Multiple default PipelineConfigs found, using oldest",
+				"count", len(defaults), "chosen", chosen.Name)
+		}
+		resolved, err := r.toPipelineResult(chosen)
+		if err != nil {
+			return nil, &port.ResolveError{Path: port.PathDefault, Err: err}
+		}
+		resolved.Path = port.PathDefault
+		return resolved, nil
+	default:
+		return nil, &port.ResolveError{Path: port.PathDefault, Err: port.ErrConfigNotFound}
+	}
 }
 
-func (r *ConfigResolver) ResolveByCollectorGroup(ctx context.Context, namespace, collectorGroup string) (*port.ResolvedConfig, error) {
-	return r.resolveByIndex(ctx, namespace, controller.IndexCollectorGroupRef, collectorGroup)
-}
-
-func (r *ConfigResolver) ResolveDefault(ctx context.Context, namespace string) (*port.ResolvedConfig, error) {
-	log := logf.FromContext(ctx)
+func (r *ConfigResolver) listDefaults(ctx context.Context, namespace string) ([]fleetv1alpha1.PipelineConfig, error) {
 	list := &fleetv1alpha1.PipelineConfigList{}
 	if err := r.client.List(ctx, list,
 		client.InNamespace(namespace),
@@ -50,47 +75,39 @@ func (r *ConfigResolver) ResolveDefault(ctx context.Context, namespace string) (
 	); err != nil {
 		return nil, fmt.Errorf("listing default PipelineConfigs: %w", err)
 	}
-	if len(list.Items) == 0 {
-		return nil, port.ErrConfigNotFound
-	}
-	chosen := selection.Pick(list.Items)
-	if len(list.Items) > 1 {
-		log.Info("Multiple default PipelineConfigs found, using oldest",
-			"count", len(list.Items), "chosen", chosen.Name)
-	}
-	return r.toPipelineResult(chosen)
+	return list.Items, nil
 }
 
-// resolveByIndex lists CollectorGroupBindings matching the given field index
-// and returns the referenced PipelineConfig content.
-func (r *ConfigResolver) resolveByIndex(ctx context.Context, namespace, indexKey, indexValue string) (*port.ResolvedConfig, error) {
-	list := &fleetv1alpha1.CollectorGroupBindingList{}
-	if err := r.client.List(ctx, list,
-		client.InNamespace(namespace),
-		client.MatchingFields{indexKey: indexValue},
-	); err != nil {
-		return nil, fmt.Errorf("listing CollectorGroupBindings by %s: %w", indexKey, err)
+// resolveBinding returns the PipelineConfig content referenced by the winning binding.
+func (r *ConfigResolver) resolveBinding(ctx context.Context, namespace string, d resolution.Decision) (*port.ResolvedConfig, error) {
+	path := port.PathCollectorGroup
+	if d.Kind == resolution.KindTenant {
+		path = port.PathTenant
+	}
+	fail := func(err error) (*port.ResolvedConfig, error) {
+		return nil, &port.ResolveError{Path: path, BindingName: d.Binding.Name, Err: err}
 	}
 
-	if len(list.Items) == 0 {
-		return nil, port.ErrConfigNotFound
-	}
-
-	binding := selection.Pick(list.Items)
 	pc := &fleetv1alpha1.PipelineConfig{}
 	if err := r.client.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
-		Name:      binding.Spec.PipelineConfigRef,
+		Name:      d.Binding.Spec.PipelineConfigRef,
 	}, pc); err != nil {
 		if apierrors.IsNotFound(err) {
 			// No fallthrough: a dangling binding is a misconfiguration to surface, not skip.
-			return nil, fmt.Errorf("PipelineConfig %q referenced by binding %q not found: %w",
-				binding.Spec.PipelineConfigRef, binding.Name, port.ErrConfigNotReady)
+			return fail(fmt.Errorf("PipelineConfig %q referenced by binding %q not found: %w",
+				d.Binding.Spec.PipelineConfigRef, d.Binding.Name, port.ErrConfigNotReady))
 		}
-		return nil, fmt.Errorf("fetching PipelineConfig %q: %w", binding.Spec.PipelineConfigRef, err)
+		return fail(fmt.Errorf("fetching PipelineConfig %q: %w", d.Binding.Spec.PipelineConfigRef, err))
 	}
 
-	return r.toPipelineResult(pc)
+	resolved, err := r.toPipelineResult(pc)
+	if err != nil {
+		return fail(err)
+	}
+	resolved.Path = path
+	resolved.BindingName = d.Binding.Name
+	return resolved, nil
 }
 
 // toPipelineResult converts a PipelineConfig into a ResolvedConfig, returning
