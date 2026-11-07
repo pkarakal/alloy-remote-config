@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 // Copyright (c) 2026 Pavlos Karakalidis
 // SPDX-License-Identifier: MIT
@@ -10,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -18,20 +18,38 @@ import (
 	"github.com/pkarakal/alloy-remote-config/test/utils"
 )
 
+const (
+	// testNamespace is where the chart is installed and every spec runs. The
+	// manager serves a single namespace, so specs share it and isolate
+	// themselves with unique names and collector attributes.
+	testNamespace = "arc-e2e"
+	// helmRelease and the names below follow from fullnameOverride "arc" in
+	// testdata/chart-values.yaml.
+	helmRelease    = "arc"
+	apiServiceName = "arc-api"
+	managerName    = "arc-controller-manager"
+	chartDir       = "charts/fleet-management"
+	chartValues    = "test/e2e/testdata/chart-values.yaml"
+)
+
 var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "example.com/alloy-remote-config:v0.0.1"
-	// gatewayImage is the Envoy gateway image to be pre-loaded into Kind when gateway tests are enabled.
-	gatewayImage = "envoyproxy/envoy:distroless-v1.37.1"
-	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
-	shouldCleanupCertManager = false
+	// alloyImage is the Alloy image the specs run. It is pinned (>= v1.13) and
+	// pre-loaded into Kind so specs never pull in-cluster. Override with ALLOY_IMAGE.
+	alloyImage = "grafana/alloy:v1.21.3"
+	// curlImage runs the in-cluster metrics request; pinned and pre-loaded like the others.
+	curlImage = "curlimages/curl:8.15.0"
 )
 
-// TestE2E runs the e2e test suite to validate the solution in an isolated environment.
-// The default setup requires Kind and CertManager.
-//
-// To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
-// To enable gateway (Envoy) image pre-loading into Kind, set: GATEWAY_ENABLED=true
+func init() {
+	if v := os.Getenv("ALLOY_IMAGE"); v != "" {
+		alloyImage = v
+	}
+}
+
+// TestE2E runs the e2e suite against a dedicated Kind cluster: the chart is
+// installed with the freshly built image and real Alloys fetch their config.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting alloy-remote-config e2e test suite\n")
@@ -39,72 +57,93 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	// First, before anything touches a cluster: refuse any context but the
+	// dedicated Kind one.
+	By("verifying the current kube context is the dedicated Kind cluster")
+	current, err := utils.Run(exec.Command("kubectl", "config", "current-context"))
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the current kube context")
+	Expect(strings.TrimSpace(current)).To(Equal(kubeContext()),
+		"e2e tests must only run against the dedicated Kind cluster %q", kindCluster())
+
 	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
+	_, err = utils.Run(exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage)))
+	Expect(err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
 	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	Expect(utils.LoadImageToKindClusterWithName(managerImage)).To(Succeed(), "Failed to load the manager image into Kind")
 
-	setupCertManager()
-	setupGateway()
+	By("pulling and loading the Alloy and curl images on Kind")
+	for _, img := range []string{alloyImage, curlImage} {
+		if _, err = utils.Run(exec.Command("docker", "image", "inspect", img)); err != nil {
+			_, err = utils.Run(exec.Command("docker", "pull", img))
+			Expect(err).NotTo(HaveOccurred(), "Failed to pull %s", img)
+		}
+		Expect(utils.LoadImageToKindClusterWithName(img)).To(Succeed(), "Failed to load %s into Kind", img)
+	}
+
+	By("creating the namespace with the restricted Pod Security level")
+	_, err = kubectl("create", "namespace", testNamespace)
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace")
+	_, err = kubectl("label", "--overwrite", "namespace", testNamespace,
+		"pod-security.kubernetes.io/enforce=restricted")
+	Expect(err).NotTo(HaveOccurred(), "Failed to label the namespace")
+
+	By("installing the Helm chart (CRDs come from the chart's crds directory)")
+	installChart()
 })
+
+// installChart installs or upgrades the release with the e2e values plus any
+// extra helm arguments, then waits for the manager to be rolled out.
+func installChart(extra ...string) {
+	GinkgoHelper()
+	repo, tag, _ := strings.Cut(managerImage, ":")
+	args := append([]string{"upgrade", "--install", helmRelease, chartDir,
+		"--namespace", testNamespace,
+		"--values", chartValues,
+		"--set", "manager.image.registry=",
+		"--set", "manager.image.repository=" + repo,
+		"--set", "manager.image.tag=" + tag}, extra...)
+	out, err := helm(args...)
+	Expect(err).NotTo(HaveOccurred(), out)
+
+	out, err = kubectl("rollout", "status", "deployment/"+managerName, "-n", testNamespace, "--timeout=180s")
+	Expect(err).NotTo(HaveOccurred(), out)
+}
 
 var _ = AfterSuite(func() {
-	teardownCertManager()
+	// Best effort: the Makefile deletes the whole cluster, but a reused
+	// cluster should not keep the chart or CRDs behind.
+	By("removing fleet resources, the chart, the CRDs and the namespace")
+	for _, kind := range []string{"collectorgroupbindings", "collectorgroups", "pipelineconfigs"} {
+		_, _ = kubectl("delete", kind+".fleet.pkarakal.com", "--all", "-n", testNamespace,
+			"--wait=true", "--timeout=60s")
+	}
+	_, _ = helm("uninstall", helmRelease, "--namespace", testNamespace)
+	_, _ = kubectl("delete", "crd", "--ignore-not-found",
+		"collectorgroupbindings.fleet.pkarakal.com",
+		"collectorgroups.fleet.pkarakal.com",
+		"pipelineconfigs.fleet.pkarakal.com")
+	_, _ = kubectl("delete", "namespace", testNamespace, "--ignore-not-found", "--wait=false")
 })
 
-// setupCertManager installs CertManager if needed for webhook tests.
-// Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.
-func setupCertManager() {
-	if os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true" {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager installation (CERT_MANAGER_INSTALL_SKIP=true)\n")
+// Dump diagnostics on failure. JustAfterEach runs before DeferCleanup, so the
+// spec's objects still exist.
+var _ = JustAfterEach(func() {
+	if !CurrentSpecReport().Failed() {
 		return
 	}
-
-	By("checking if CertManager is already installed")
-	if utils.IsCertManagerCRDsInstalled() {
-		_, _ = fmt.Fprintf(GinkgoWriter, "CertManager is already installed. Skipping installation.\n")
-		return
+	dump := func(title string, args ...string) {
+		out, err := kubectl(args...)
+		if err != nil {
+			out += "\n(error: " + err.Error() + ")"
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n===== %s =====\n%s\n", title, out)
 	}
-
-	// Mark for cleanup before installation to handle interruptions and partial installs.
-	shouldCleanupCertManager = true
-
-	By("installing CertManager")
-	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
-}
-
-// setupGateway pulls the Envoy gateway image and loads it into the Kind cluster.
-// Skips loading if GATEWAY_ENABLED is not set to "true".
-func setupGateway() {
-	if os.Getenv("GATEWAY_ENABLED") != "true" {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping gateway image pre-load (GATEWAY_ENABLED != true)\n")
-		return
+	dump("manager logs", "logs", "-n", testNamespace, "deployment/"+managerName, "--tail=300")
+	dump("alloy logs", "logs", "-n", testNamespace, "-l", "e2e-alloy", "--all-containers", "--tail=200", "--prefix")
+	for _, kind := range []string{"pipelineconfigs", "collectorgroups", "collectorgroupbindings"} {
+		dump(kind, "get", kind+".fleet.pkarakal.com", "-n", testNamespace, "-o", "yaml")
 	}
-
-	By("pulling the gateway (Envoy) image")
-	cmd := exec.Command("docker", "pull", gatewayImage)
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to pull the gateway image")
-
-	By("loading the gateway image on Kind")
-	err = utils.LoadImageToKindClusterWithName(gatewayImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the gateway image into Kind")
-}
-
-// teardownCertManager uninstalls CertManager if it was installed by setupCertManager.
-// This ensures we only remove what we installed.
-func teardownCertManager() {
-	if !shouldCleanupCertManager {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager cleanup (not installed by this suite)\n")
-		return
-	}
-
-	By("uninstalling CertManager")
-	utils.UninstallCertManager()
-}
+	dump("pods", "get", "pods", "-n", testNamespace, "-o", "wide")
+	dump("events", "get", "events", "-n", testNamespace, "--sort-by=.lastTimestamp")
+})
