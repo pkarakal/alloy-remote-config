@@ -483,6 +483,90 @@ canary   Active   canary   3fa9c1...  4         1        12s      2d
   `alloy_remote_config_registered_tenants_by_status{status}` is derived from the CRDs, so every replica reports the
   same value: aggregate it with `max`, not `sum`.
 
+### Trusted attributes (new, opt-in)
+
+By default a collector's identity is self-asserted: `GetConfig` and `RegisterCollector` read `tenant`,
+`collector_group` and every other matcher attribute from the request body. This server does no authentication itself
+(an ingress or proxy does), so any collector that passes your ingress can request any tenant's config and claim any
+matcher attribute such as `cluster_id`.
+
+`--trusted-attribute <key>=<Header-Name>` (repeatable) takes the attribute `<key>` from a request header that your proxy
+sets after authenticating the caller:
+
+```
+--trusted-attribute=tenant=X-Scope-OrgID
+--trusted-attribute=org_id=X-Org-ID
+```
+
+Without the flag nothing changes. With it, for each trusted key:
+
+| RPC                   | Header missing or ambiguous | Attribute differs from header | Otherwise                                  |
+|-----------------------|-----------------------------|-------------------------------|--------------------------------------------|
+| `GetConfig`           | `Unauthenticated`           | `PermissionDenied`            | The header value replaces the attribute    |
+| `RegisterCollector`   | Skipped, returns OK         | Skipped, returns OK           | Registered with the header value           |
+| `UnregisterCollector` | Skipped, returns OK         | n/a (no attributes)           | Removes only an entry of the header tenant |
+
+"Ambiguous" means the header was sent more than once with different values; an empty value counts as missing. An
+attribute the collector did not send (or sent empty) is simply filled in from the header. `RegisterCollector` and
+`UnregisterCollector` never fail because Alloy treats a Register error as fatal for `remotecfg`. `UnregisterCollector`
+is only scoped when `tenant` is a trusted key. Rejections are counted in
+`alloy_remote_config_trusted_attribute_rejections_total`.
+
+**Requirement:** the proxy must overwrite or strip a client-supplied header of the same name. Otherwise a collector can
+send the header itself and the server cannot tell it from the proxy's. Pass the flag through the chart's existing
+`manager.args` value:
+
+```yaml
+manager:
+  args:
+    - --leader-elect
+    - --trusted-attribute=tenant=X-Scope-OrgID
+```
+
+Matcher-defined cohorts should pin a trusted key (for example `org_id="..."`) so they cannot target other orgs'
+collectors. This is not enforced yet; a global (unscoped) binding mode is deferred.
+
+#### nginx sidecar or ingress with `auth_request`
+
+```nginx
+location / {
+  auth_request /auth;
+  # The auth service answers with X-Scope-OrgID for the authenticated caller.
+  auth_request_set $org $upstream_http_x_scope_orgid;
+  # Replaces any client-sent X-Scope-OrgID; an empty $org drops the header.
+  proxy_set_header X-Scope-OrgID $org;
+  proxy_pass http://alloy-remote-config-server:12345;
+}
+```
+
+ingress-nginx is retired, but the equivalent annotation `nginx.ingress.kubernetes.io/auth-response-headers: X-Scope-OrgID`
+exists there and forwards the auth service's response header to the upstream (replacing the client's).
+
+#### Envoy gateway (not tested)
+
+With the chart's Envoy gateway, use the `jwt_authn` filter's `claim_to_headers` to copy a verified claim into the
+header, and put a `header_mutation` filter before `jwt_authn` that removes the client's copy so it cannot be spoofed
+when the claim is absent:
+
+```yaml
+http_filters:
+  - name: envoy.filters.http.header_mutation
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+      mutations:
+        request_mutations:
+          - remove: x-scope-orgid
+  - name: envoy.filters.http.jwt_authn
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+      providers:
+        idp:
+          # issuer, remote_jwks, ...
+          claim_to_headers:
+            - header_name: x-scope-orgid
+              claim_name: org
+```
+
 ### Default PipelineConfig
 
 The default fallback config is discovered by label, not by name. Apply the well-known label to any `PipelineConfig` to
@@ -514,6 +598,7 @@ The operator exposes Prometheus metrics under the `alloy_remote_config` namespac
 | `alloy_remote_config_registry_errors_total` (new)  | Counter   | `op`                | Swallowed registry errors; `op` is `register`, `unregister` or `refresh` |
 | `alloy_remote_config_registry_truncated_total`     | Counter   | —                   | Registrations dropped because a binding hit the 1000-entry `registeredTenants` cap |
 | `alloy_remote_config_config_status_reports_total` (new) | Counter | `status`          | GetConfig calls by reported apply status (`applied`, `applying`, `failed`, `unknown`); per replica, use `sum` |
+| `alloy_remote_config_trusted_attribute_rejections_total` (new) | Counter | `procedure`, `reason` | Requests rejected or skipped by `--trusted-attribute`; `reason` is `missing`, `ambiguous` or `mismatch` |
 
 ### Resolution metrics
 

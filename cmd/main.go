@@ -65,6 +65,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var trustedAttrs interceptor.TrustedAttributeFlag
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -88,6 +89,9 @@ func main() {
 		"The namespace to resolve pipeline configurations in.")
 	flag.DurationVar(&collectorTTL, "collector-ttl", 5*time.Minute,
 		"Duration after which a registered tenant entry is evicted if not refreshed. Set to 0 to disable.")
+	flag.Var(&trustedAttrs, "trusted-attribute",
+		"Repeatable <key>=<Header-Name>. Takes the local attribute <key> from a request header set by a trusted "+
+			"proxy instead of the client. The proxy must overwrite or strip client-supplied copies of the header.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -239,9 +243,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	metricsInterceptor := interceptor.NewMetricsInterceptor(rpcMetrics)
+	interceptors := []connect.Interceptor{metricsInterceptor}
+	if len(trustedAttrs) > 0 {
+		setupLog.Info("Trusting attributes from request headers", "trustedAttributes", trustedAttrs.String())
+		interceptors = append(interceptors, interceptor.NewTrustedAttributesInterceptor(trustedAttrs, rpcMetrics))
+	}
 	mux.Handle(collectorv1connect.NewCollectorServiceHandler(
 		collectorSvc,
-		connect.WithInterceptors(metricsInterceptor),
+		connect.WithInterceptors(interceptors...),
 	))
 	reflector := grpcreflect.NewStaticReflector(collectorv1connect.CollectorServiceName)
 	mux.Handle(grpcreflect.NewHandlerV1(reflector))

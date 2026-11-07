@@ -185,7 +185,7 @@ func (s *CollectorService) UnregisterCollector(
 	req *connect.Request[collectorv1.UnregisterCollectorRequest],
 ) (*connect.Response[collectorv1.UnregisterCollectorResponse], error) {
 	log := logf.FromContext(ctx)
-	if err := s.registry.Unregister(ctx, req.Msg.GetId()); err != nil {
+	if err := s.registry.Unregister(ctx, req.Msg.GetId(), port.UnregisterScopeFromContext(ctx)); err != nil {
 		// Best-effort for consistency with RegisterCollector; TTL eviction cleans up.
 		s.countRegistryError("unregister")
 		log.Error(err, "Failed to unregister collector", "id", req.Msg.GetId())

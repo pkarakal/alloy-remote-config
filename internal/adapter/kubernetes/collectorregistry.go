@@ -243,8 +243,9 @@ func sleepJitter(ctx context.Context, attempt int) {
 
 // Unregister removes the entry whose CollectorID matches id from whichever
 // CollectorGroupBinding holds it. The call is idempotent: if id is not found
-// in any binding, it returns nil.
-func (r *CollectorRegistry) Unregister(ctx context.Context, id string) error {
+// in any binding, it returns nil. A scope with a tenant only matches entries
+// of that tenant, so a collector cannot remove another tenant's registration.
+func (r *CollectorRegistry) Unregister(ctx context.Context, id string, scope port.UnregisterScope) error {
 	log := logf.FromContext(ctx)
 
 	list := &fleetv1alpha1.CollectorGroupBindingList{}
@@ -253,7 +254,7 @@ func (r *CollectorRegistry) Unregister(ctx context.Context, id string) error {
 	}
 
 	for i := range list.Items {
-		if indexTenantByCollectorID(list.Items[i].Status.RegisteredTenants, id) < 0 {
+		if indexScopedTenant(list.Items[i].Status.RegisteredTenants, id, scope) < 0 {
 			continue
 		}
 		bindingKey := client.ObjectKeyFromObject(&list.Items[i])
@@ -269,7 +270,7 @@ func (r *CollectorRegistry) Unregister(ctx context.Context, id string) error {
 				}
 				return fmt.Errorf("re-fetching CollectorGroupBinding %q: %w", bindingKey.Name, err)
 			}
-			idx := indexTenantByCollectorID(fresh.Status.RegisteredTenants, id)
+			idx := indexScopedTenant(fresh.Status.RegisteredTenants, id, scope)
 			if idx < 0 {
 				// Already removed by a concurrent call.
 				return nil
@@ -320,10 +321,10 @@ func upsertTenant(tenants *[]fleetv1alpha1.RegisteredTenant, t fleetv1alpha1.Reg
 	*tenants = append(*tenants, t)
 }
 
-// indexTenantByCollectorID returns the index of the entry with the given
-// collectorID, or -1 if not found.
-func indexTenantByCollectorID(tenants []fleetv1alpha1.RegisteredTenant, collectorID string) int {
+// indexScopedTenant returns the index of the entry with the given collectorID,
+// or -1. When the scope names a tenant, the entry must also belong to it.
+func indexScopedTenant(tenants []fleetv1alpha1.RegisteredTenant, collectorID string, scope port.UnregisterScope) int {
 	return slices.IndexFunc(tenants, func(t fleetv1alpha1.RegisteredTenant) bool {
-		return t.CollectorID == collectorID
+		return t.CollectorID == collectorID && (scope.Tenant == "" || t.ID == scope.Tenant)
 	})
 }

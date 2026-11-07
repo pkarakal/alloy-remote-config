@@ -195,7 +195,7 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 				}).Should(Succeed())
 
 				// Unregister.
-				Expect(reg.Unregister(ctx, "collector-x")).To(Succeed())
+				Expect(reg.Unregister(ctx, "collector-x", port.UnregisterScope{})).To(Succeed())
 
 				// Verify removal.
 				b := &fleetv1alpha1.CollectorGroupBinding{}
@@ -204,10 +204,35 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 			})
 		})
 
+		Context("when a tenant scope is given", func() {
+			const bindingName = "unreg-scoped-binding"
+			AfterEach(func() { deleteBinding(bindingName) })
+
+			It("removes the entry only when the tenant matches", func() {
+				makeBinding(bindingName, "my-tenant", "")
+				reg := newRegistry()
+				Eventually(func(g Gomega) {
+					g.Expect(reg.Register(ctx, makeInfo("collector-s", "my-tenant", ""))).To(Succeed())
+					b := &fleetv1alpha1.CollectorGroupBinding{}
+					g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bindingName, Namespace: namespace}, b)).To(Succeed())
+					g.Expect(b.Status.RegisteredTenants).To(HaveLen(1))
+				}).Should(Succeed())
+
+				Expect(reg.Unregister(ctx, "collector-s", port.UnregisterScope{Tenant: "other-tenant"})).To(Succeed())
+				b := &fleetv1alpha1.CollectorGroupBinding{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bindingName, Namespace: namespace}, b)).To(Succeed())
+				Expect(b.Status.RegisteredTenants).To(HaveLen(1))
+
+				Expect(reg.Unregister(ctx, "collector-s", port.UnregisterScope{Tenant: "my-tenant"})).To(Succeed())
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bindingName, Namespace: namespace}, b)).To(Succeed())
+				Expect(b.Status.RegisteredTenants).To(BeEmpty())
+			})
+		})
+
 		Context("when the collector ID is not found in any binding", func() {
 			It("returns nil (idempotent)", func() {
 				reg := newRegistry()
-				Expect(reg.Unregister(ctx, "nonexistent-collector")).To(Succeed())
+				Expect(reg.Unregister(ctx, "nonexistent-collector", port.UnregisterScope{})).To(Succeed())
 			})
 		})
 	})
