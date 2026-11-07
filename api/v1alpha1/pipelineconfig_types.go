@@ -10,8 +10,10 @@ import (
 // PipelineConfigSpec defines the desired state of PipelineConfig
 type PipelineConfigSpec struct {
 	// Content is the alloy pipeline configuration in raw format.
-	// No validation is performed on the content and it is up to
-	// the tenant Alloys to report any syntax errors
+	// It must not be empty or whitespace only. The syntax is not validated,
+	// so it is up to the tenant Alloys to report any syntax errors.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.trim() != ''",message="content must not be blank"
 	Content string `json:"content"`
 
 	// Description is an optional description of the pipeline configuration

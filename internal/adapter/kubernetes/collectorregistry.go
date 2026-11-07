@@ -16,6 +16,7 @@ import (
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
 	"github.com/pkarakal/alloy-remote-config/internal/controller"
 	"github.com/pkarakal/alloy-remote-config/internal/port"
+	"github.com/pkarakal/alloy-remote-config/internal/selection"
 )
 
 const maxPatchRetries = 3
@@ -150,7 +151,7 @@ func (r *CollectorRegistry) findBinding(
 			return nil, fmt.Errorf("listing tenant bindings: %w", err)
 		}
 		if len(list.Items) > 0 {
-			return &list.Items[0], nil
+			return selection.Pick(list.Items), nil
 		}
 	}
 	if collectorGroup != "" {
@@ -162,7 +163,7 @@ func (r *CollectorRegistry) findBinding(
 			return nil, fmt.Errorf("listing group bindings: %w", err)
 		}
 		if len(list.Items) > 0 {
-			return &list.Items[0], nil
+			return selection.Pick(list.Items), nil
 		}
 	}
 	return nil, nil

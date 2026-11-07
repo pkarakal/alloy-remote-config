@@ -117,6 +117,11 @@ spec:
 
 Deletion is blocked while `activeBindings > 0`.
 
+**Empty content is rejected.** `spec.content` must contain at least one non-whitespace character (enforced by
+`minLength` and a CEL rule). Objects stored before this rule keep working through validation ratcheting, which needs
+Kubernetes 1.30 or newer. Such a blank object is treated as not ready: its `contentHash` is cleared and the API answers
+`Unavailable` instead of serving it.
+
 ---
 
 ### CollectorGroup
@@ -176,8 +181,19 @@ spec:
 | `phase`             | `Pending`, `Active`, or `Degraded`                                                                                                                                                                                                                                               |
 | `configHash`        | Hash of the `PipelineConfig` content currently being served                                                                                                                                                                                                                      |
 | `lastSyncedAt`      | Time of the last successful reconcile                                                                                                                                                                                                                                            |
-| `conditions`        | `RefsValid` — whether all referenced resources exist                                                                                                                                                                                                                             |
+| `conditions`        | `RefsValid` — whether all referenced resources exist; `Overlap` — see below                                                                                                                                                                                                                             |
 | `registeredTenants` | List of tenants currently registered to this binding. Each entry contains the tenant `id`, the collector instance `collectorId`, and a `lastSeenAt` timestamp. Entries are upserted on `RegisterCollector` and evicted after the collector TTL window elapses without a refresh. |
+
+**Dangling references.** If the binding chosen for a tenant or group points at a `PipelineConfig` that does not exist,
+`GetConfig` answers `Unavailable` (not `Internal`) and does not fall through to the group or default config.
+
+**Deterministic tie-break.** When several bindings share a `tenantRef` (or a `collectorGroupRef`) in one namespace, the
+oldest by `metadata.creationTimestamp` wins, then the lowest name. The same rule applies to multiple default-labeled
+`PipelineConfig` resources, and the config resolver and collector registry always pick the same binding.
+
+**Overlap condition.** A binding that loses to another binding with the same target gets `Overlap=True` with reason
+`DuplicateTarget` and a message naming the winner. Other bindings get `Overlap=False`. The phase is not affected, and
+the condition clears when the winner is deleted or retargeted.
 
 ---
 

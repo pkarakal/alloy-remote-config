@@ -7,14 +7,20 @@ import (
 	"path/filepath"
 	"time"
 
+	"connectrpc.com/connect"
+	collectorv1 "github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+
+	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
 )
 
 // Schema upgrade: objects created under the previous CRDs (crds-old/) must
@@ -53,7 +59,7 @@ var _ = Describe("schema upgrade from crds-old", Ordered, func() {
 
 			golden := readGolden(sc)
 			for _, as := range attrSets {
-				old.expectMatchesGolden(sc, as.Name, as.Attrs, golden[as.Name])
+				old.expectMatchesGolden(sc, as.Attrs, golden[as.Name])
 			}
 		})
 	}
@@ -83,3 +89,64 @@ func (h *harness) applyCRDs(dir string) {
 		}, 30*time.Second, 100*time.Millisecond).Should(Succeed())
 	}
 }
+
+// Blank content is rejected on create, but objects stored before the rule must
+// survive validation ratcheting on unrelated updates and must never be served.
+var _ = Describe("blank PipelineConfig content", func() {
+	DescribeTable("is rejected on create under the current CRDs",
+		func(content string) {
+			ns := &corev1.Namespace{Name: "compat-blank-rejected"}
+			Expect(client.IgnoreAlreadyExists(current.client.Create(ctx, ns))).To(Succeed())
+			pc := &fleetv1alpha1.PipelineConfig{
+				Namespace: ns.Name, GenerateName: "blank-",
+				Spec: fleetv1alpha1.PipelineConfigSpec{Content: content},
+			}
+			err := current.client.Create(ctx, pc)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
+		},
+		Entry("empty", ""),
+		Entry("spaces", "   "),
+		Entry("newlines and tabs", "\n\t \n"),
+	)
+
+	Context("created under crds-old", Ordered, func() {
+		const ns = "compat-blank-preexisting"
+		key := client.ObjectKey{Namespace: ns, Name: "default-config"}
+		var old *harness
+
+		BeforeAll(func() {
+			if updateGoldens() {
+				Skip("goldens are being rewritten")
+			}
+			old = startHarness("crds-old")
+			DeferCleanup(func() { old.stop() })
+
+			Expect(old.client.Create(ctx, &corev1.Namespace{Name: ns})).To(Succeed())
+			Expect(old.client.Create(ctx, &fleetv1alpha1.PipelineConfig{
+				Namespace: ns, Name: key.Name,
+				Labels: map[string]string{fleetv1alpha1.LabelDefaultPipelineConfig: "true"},
+				Spec:   fleetv1alpha1.PipelineConfigSpec{Content: ""},
+			})).To(Succeed())
+			old.applyCRDs(filepath.Join("..", "..", "config", "crd", "bases"))
+		})
+
+		It("accepts a no-op update through ratcheting", func() {
+			live := &fleetv1alpha1.PipelineConfig{}
+			Expect(old.client.Get(ctx, key, live)).To(Succeed())
+			Expect(old.client.Update(ctx, live)).To(Succeed())
+		})
+
+		It("answers Unavailable and never serves a hash", func() {
+			Eventually(func(g Gomega) {
+				live := &fleetv1alpha1.PipelineConfig{}
+				g.Expect(old.mgr.GetClient().Get(ctx, key, live)).To(Succeed())
+				g.Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
+				g.Expect(live.Status.ContentHash).To(BeEmpty())
+			}, 30*time.Second, 100*time.Millisecond).Should(Succeed())
+			_, err := old.serviceFor(ns).GetConfig(ctx, connect.NewRequest(&collectorv1.GetConfigRequest{
+				Id: "compat-collector", LocalAttributes: map[string]string{},
+			}))
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnavailable))
+		})
+	})
+})

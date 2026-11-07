@@ -6,21 +6,26 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
+	"github.com/pkarakal/alloy-remote-config/internal/selection"
 )
 
 const (
@@ -94,6 +99,9 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Step 3.5 — Flag bindings that lose to a duplicate target
+	r.setOverlapCondition(ctx, groupBinding)
+
 	// Step 4 — Idempotent counter management
 	if err := r.manageCounters(ctx, groupBinding); err != nil {
 		return ctrl.Result{}, err
@@ -122,6 +130,53 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{RequeueAfter: r.CollectorTTL / 2}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// setOverlapCondition marks the binding as Overlap=True when another binding
+// with the same target wins selection, and Overlap=False otherwise. It only
+// edits the in-memory conditions; the caller's status write persists them.
+func (r *CollectorGroupBindingReconciler) setOverlapCondition(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
+) {
+	log := logf.FromContext(ctx)
+	winner, err := r.winningBinding(ctx, b)
+	if err != nil {
+		log.Error(err, "Failed to list CollectorGroupBindings for overlap check", "binding", b.Name)
+		return
+	}
+	cond := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeOverlap,
+		Status:             metav1.ConditionFalse,
+		Reason:             "UniqueTarget",
+		Message:            "No other binding shares this target",
+		ObservedGeneration: b.Generation,
+	}
+	if winner != nil && winner.Name != b.Name {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = "DuplicateTarget"
+		cond.Message = fmt.Sprintf("Binding %q was created first and wins for the same target", winner.Name)
+	}
+	meta.SetStatusCondition(&b.Status.Conditions, cond)
+}
+
+// winningBinding returns the binding that selection picks among all bindings
+// sharing b's target, which is b itself when it is the only one.
+func (r *CollectorGroupBindingReconciler) winningBinding(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
+) (*fleetv1alpha1.CollectorGroupBinding, error) {
+	indexKey, value := IndexCollectorGroupRef, b.Spec.CollectorGroupRef
+	if b.Spec.TenantRef != "" {
+		indexKey, value = IndexTenantRef, b.Spec.TenantRef
+	}
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(b.Namespace), client.MatchingFields{indexKey: value}); err != nil {
+		return nil, err
+	}
+	// The cache may not hold b yet, so make sure it competes.
+	if !slices.ContainsFunc(list.Items, func(o fleetv1alpha1.CollectorGroupBinding) bool { return o.Name == b.Name }) {
+		list.Items = append(list.Items, *b)
+	}
+	return selection.Pick(list.Items), nil
 }
 
 // evictStaleTenants removes RegisteredTenant entries whose LastSeenAt is older
@@ -355,6 +410,61 @@ func (r *CollectorGroupBindingReconciler) enqueueBindingsForPipelineConfig(
 	return reqs
 }
 
+// enqueueBindingsSharingTarget maps a binding to every binding with the same
+// tenantRef or collectorGroupRef, so a loser reacts when the winner changes.
+func (r *CollectorGroupBindingReconciler) enqueueBindingsSharingTarget(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
+) []reconcile.Request {
+	var matches []client.ListOption
+	if b.Spec.TenantRef != "" {
+		matches = append(matches, client.MatchingFields{IndexTenantRef: b.Spec.TenantRef})
+	} else if b.Spec.CollectorGroupRef != "" {
+		matches = append(matches, client.MatchingFields{IndexCollectorGroupRef: b.Spec.CollectorGroupRef})
+	} else {
+		return nil
+	}
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list, append(matches, client.InNamespace(b.Namespace))...); err != nil {
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(list.Items))
+	for _, o := range list.Items {
+		if o.Name != b.Name {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&o)})
+		}
+	}
+	return reqs
+}
+
+// bindingTargetHandler fans out on create, delete and target changes only.
+// Reacting to status updates would make every binding re-trigger its peers.
+func (r *CollectorGroupBindingReconciler) bindingTargetHandler() handler.EventHandler {
+	enqueue := func(ctx context.Context, q workqueue.TypedRateLimitingInterface[reconcile.Request], obj client.Object) {
+		if b, ok := obj.(*fleetv1alpha1.CollectorGroupBinding); ok {
+			for _, req := range r.enqueueBindingsSharingTarget(ctx, b) {
+				q.Add(req)
+			}
+		}
+	}
+	return handler.Funcs{
+		CreateFunc: func(ctx context.Context, e event.TypedCreateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueue(ctx, q, e.Object)
+		},
+		DeleteFunc: func(ctx context.Context, e event.TypedDeleteEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueue(ctx, q, e.Object)
+		},
+		UpdateFunc: func(ctx context.Context, e event.TypedUpdateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			oldB, okOld := e.ObjectOld.(*fleetv1alpha1.CollectorGroupBinding)
+			newB, okNew := e.ObjectNew.(*fleetv1alpha1.CollectorGroupBinding)
+			if okOld && okNew && (oldB.Spec.TenantRef != newB.Spec.TenantRef ||
+				oldB.Spec.CollectorGroupRef != newB.Spec.CollectorGroupRef) {
+				enqueue(ctx, q, oldB)
+				enqueue(ctx, q, newB)
+			}
+		},
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	indexer := mgr.GetFieldIndexer()
@@ -401,6 +511,7 @@ func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 			&fleetv1alpha1.PipelineConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.enqueueBindingsForPipelineConfig),
 		).
+		Watches(&fleetv1alpha1.CollectorGroupBinding{}, r.bindingTargetHandler()).
 		Named("collectorgroupbinding").
 		Complete(r)
 }

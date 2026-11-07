@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
@@ -80,8 +81,11 @@ func (r *PipelineConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, r.Update(ctx, pc)
 	}
 
-	// TODO: before shipping v1, add alloy syntax validation
-	if pc.Spec.Content == "" {
+	// Alloy syntax validation is planned; for now only blank content is refused.
+	// Blank objects can predate the CRD rule (validation ratcheting keeps them),
+	// so drop the hash to make them read as not ready instead of serving it.
+	if strings.TrimSpace(pc.Spec.Content) == "" {
+		pc.Status.ContentHash = ""
 		meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
 			Type:               typeContentValidPipelineConfig,
 			Status:             metav1.ConditionFalse,

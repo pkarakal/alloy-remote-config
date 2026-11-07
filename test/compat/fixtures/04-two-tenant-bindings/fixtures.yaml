@@ -1,7 +1,7 @@
 # Copyright 2026 Pavlos Karakalidis
 # SPDX-License-Identifier: MIT
-# Two bindings for tenant "acme": the served winner is nondeterministic today (cache list
-# order). WS-S makes it deterministic by creationTimestamp, then name.
+# Two bindings for tenant "acme": the oldest creationTimestamp wins, then the lowest name
+# (acme-binding-a).
 ---
 apiVersion: fleet.pkarakal.com/v1alpha1
 kind: PipelineConfig

@@ -119,6 +119,10 @@ const (
 	// ConditionTypeRefsValid indicates both PipelineConfig and
 	// CollectorGroup/TenantRef resolve to existing resources.
 	ConditionTypeRefsValid = "RefsValid"
+
+	// ConditionTypeOverlap is True on a binding that loses to an older binding
+	// with the same tenantRef or collectorGroupRef in the same namespace.
+	ConditionTypeOverlap = "Overlap"
 )
 
 // +kubebuilder:object:root=true
