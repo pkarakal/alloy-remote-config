@@ -1,0 +1,27 @@
+{
+  "both": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.acme.input]\n    logs    = [otelcol.exporter.otlphttp.acme.input]\n    traces  = [otelcol.exporter.otlphttp.acme.input]\n  }\n}\n\notelcol.exporter.otlphttp \"acme\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_ACME\")\n  }\n}\n",
+    "hash": "3073db83b30733b21c1c95e8dcdfc78458a31195e59231203db6373c8a0b7f0d"
+  },
+  "group-only": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.prod.input]\n    logs    = [otelcol.exporter.otlphttp.prod.input]\n    traces  = [otelcol.exporter.otlphttp.prod.input]\n  }\n}\n\notelcol.exporter.otlphttp \"prod\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_PROD\")\n  }\n}\n",
+    "hash": "6362835b3b2f960a730d7f86d6c7ca70bccff456d45b42329c3686a7f357e115"
+  },
+  "neither": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.default.input]\n    logs    = [otelcol.exporter.otlphttp.default.input]\n    traces  = [otelcol.exporter.otlphttp.default.input]\n  }\n}\n\notelcol.exporter.otlphttp \"default\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_DEFAULT\")\n  }\n}\n",
+    "hash": "9ade7429a59b273f81d60c8da4135915e680546f487fee06040c9b8a07856ed4"
+  },
+  "tenant-only": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.acme.input]\n    logs    = [otelcol.exporter.otlphttp.acme.input]\n    traces  = [otelcol.exporter.otlphttp.acme.input]\n  }\n}\n\notelcol.exporter.otlphttp \"acme\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_ACME\")\n  }\n}\n",
+    "hash": "3073db83b30733b21c1c95e8dcdfc78458a31195e59231203db6373c8a0b7f0d"
+  },
+  "unknown": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.default.input]\n    logs    = [otelcol.exporter.otlphttp.default.input]\n    traces  = [otelcol.exporter.otlphttp.default.input]\n  }\n}\n\notelcol.exporter.otlphttp \"default\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_DEFAULT\")\n  }\n}\n",
+    "hash": "9ade7429a59b273f81d60c8da4135915e680546f487fee06040c9b8a07856ed4"
+  }
+}

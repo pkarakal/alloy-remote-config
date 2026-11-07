@@ -1,0 +1,43 @@
+{
+  "both": {
+    "code": "ok",
+    "candidates": [
+      {
+        "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.acme_b.input]\n    logs    = [otelcol.exporter.otlphttp.acme_b.input]\n    traces  = [otelcol.exporter.otlphttp.acme_b.input]\n  }\n}\n\notelcol.exporter.otlphttp \"acme_b\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_ACME_B\")\n  }\n}\n",
+        "hash": "819654450868cf8375d5d9fd359fd300d4599f9075b6402e142ee62533b8db96"
+      },
+      {
+        "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.acme_a.input]\n    logs    = [otelcol.exporter.otlphttp.acme_a.input]\n    traces  = [otelcol.exporter.otlphttp.acme_a.input]\n  }\n}\n\notelcol.exporter.otlphttp \"acme_a\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_ACME_A\")\n  }\n}\n",
+        "hash": "e157afed88e4b324b0f91848a927960b6d2792e5f80cfabfe5f1b5952d5bbb06"
+      }
+    ]
+  },
+  "group-only": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.default.input]\n    logs    = [otelcol.exporter.otlphttp.default.input]\n    traces  = [otelcol.exporter.otlphttp.default.input]\n  }\n}\n\notelcol.exporter.otlphttp \"default\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_DEFAULT\")\n  }\n}\n",
+    "hash": "9ade7429a59b273f81d60c8da4135915e680546f487fee06040c9b8a07856ed4"
+  },
+  "neither": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.default.input]\n    logs    = [otelcol.exporter.otlphttp.default.input]\n    traces  = [otelcol.exporter.otlphttp.default.input]\n  }\n}\n\notelcol.exporter.otlphttp \"default\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_DEFAULT\")\n  }\n}\n",
+    "hash": "9ade7429a59b273f81d60c8da4135915e680546f487fee06040c9b8a07856ed4"
+  },
+  "tenant-only": {
+    "code": "ok",
+    "candidates": [
+      {
+        "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.acme_b.input]\n    logs    = [otelcol.exporter.otlphttp.acme_b.input]\n    traces  = [otelcol.exporter.otlphttp.acme_b.input]\n  }\n}\n\notelcol.exporter.otlphttp \"acme_b\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_ACME_B\")\n  }\n}\n",
+        "hash": "819654450868cf8375d5d9fd359fd300d4599f9075b6402e142ee62533b8db96"
+      },
+      {
+        "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.acme_a.input]\n    logs    = [otelcol.exporter.otlphttp.acme_a.input]\n    traces  = [otelcol.exporter.otlphttp.acme_a.input]\n  }\n}\n\notelcol.exporter.otlphttp \"acme_a\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_ACME_A\")\n  }\n}\n",
+        "hash": "e157afed88e4b324b0f91848a927960b6d2792e5f80cfabfe5f1b5952d5bbb06"
+      }
+    ]
+  },
+  "unknown": {
+    "code": "ok",
+    "content": "otelcol.receiver.otlp \"default\" {\n  http {}\n  grpc {}\n\n  output {\n    metrics = [otelcol.exporter.otlphttp.default.input]\n    logs    = [otelcol.exporter.otlphttp.default.input]\n    traces  = [otelcol.exporter.otlphttp.default.input]\n  }\n}\n\notelcol.exporter.otlphttp \"default\" {\n  client {\n    endpoint = sys.env(\"OTLP_ENDPOINT_DEFAULT\")\n  }\n}\n",
+    "hash": "9ade7429a59b273f81d60c8da4135915e680546f487fee06040c9b8a07856ed4"
+  }
+}
