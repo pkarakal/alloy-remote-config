@@ -20,9 +20,6 @@ const (
 	// A change reaches Alloy within one 10s poll; allow several polls plus apply time.
 	reloadTimeout = 60 * time.Second
 	pollInterval  = 2 * time.Second
-	// statusPoll samples binding status fast: Alloy reports an apply status once
-	// per change, and the operator shows it until the next poll (about 10s).
-	statusPoll = 500 * time.Millisecond
 	// settleFor is how long a "must not change" assertion has to hold: two polls.
 	settleFor = 25 * time.Second
 )
@@ -86,7 +83,7 @@ var _ = Describe("Alloy remote config", func() {
 						HaveField("ID", id),
 						HaveField("ConfigStatus", fleetv1alpha1.ConfigStatusApplied),
 					)))
-			}, reloadTimeout, statusPoll).Should(Succeed())
+			}, reloadTimeout, pollInterval).Should(Succeed())
 
 			expectRunning(alloy, "marker_v1")
 		})
@@ -108,7 +105,7 @@ var _ = Describe("Alloy remote config", func() {
 				b := getBinding(g, bind)
 				g.Expect(b.Status.FailedCount).To(BeNumerically(">=", 1))
 				g.Expect(b.Status.LastApplyError).To(ContainSubstring("no.such.component"))
-			}, reloadTimeout, statusPoll).Should(Succeed())
+			}, reloadTimeout, pollInterval).Should(Succeed())
 			Eventually(alloy.Logs, reloadTimeout, pollInterval).Should(
 				ContainSubstring("failed to parse and load new remote configuration"))
 
@@ -117,6 +114,9 @@ var _ = Describe("Alloy remote config", func() {
 				g.Expect(alloy.ComponentIDs(g, "")).To(ConsistOf(markerID("marker_v2")))
 				// No new config was loaded successfully.
 				g.Expect(alloy.LoadedHashes(g)).To(Equal(loadedBefore))
+				// Alloy omits the status on later polls; the Failed report must stick.
+				b := getBinding(g, bind)
+				g.Expect(b.Status.FailedCount).To(BeNumerically(">=", 1))
 			}, settleFor, pollInterval).Should(Succeed())
 		})
 	})
