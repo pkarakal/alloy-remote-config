@@ -19,6 +19,8 @@ type CollectorGroupStatus struct {
 	// ActiveBindings is the number of CollectorGroupBindings currently
 	// referencing this CollectorGroup. Check this field before deleting
 	// the group to understand which bindings would be left dangling.
+	// It is derived from the bindings on every reconcile and self-heals.
+	// +kubebuilder:validation:Minimum=0
 	ActiveBindings int `json:"activeBindings"`
 
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

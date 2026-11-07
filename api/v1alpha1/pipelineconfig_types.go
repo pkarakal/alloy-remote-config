@@ -29,6 +29,8 @@ type PipelineConfigStatus struct {
 	// ActiveBindings is the number of CollectorGroupBindings currently
 	// referencing this PipelineConfig. Check this field before modifying
 	// or deleting the config to understand the blast radius of the change.
+	// It is derived from the bindings on every reconcile and self-heals.
+	// +kubebuilder:validation:Minimum=0
 	ActiveBindings int `json:"activeBindings"`
 	// ObservedGeneration is the last generation of this PipelineConfig
 	// that the operator has successfully reconciled. If this value is less

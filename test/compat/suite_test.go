@@ -106,9 +106,9 @@ func startHarness(crdDir string) *harness {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
+	Expect(controller.SetupIndexes(ctx, h.mgr)).To(Succeed())
 	Expect((&controller.PipelineConfigReconciler{Client: h.mgr.GetClient(), Scheme: h.mgr.GetScheme()}).SetupWithManager(h.mgr)).To(Succeed())
 	Expect((&controller.CollectorGroupReconciler{Client: h.mgr.GetClient(), Scheme: h.mgr.GetScheme()}).SetupWithManager(h.mgr)).To(Succeed())
-	// SetupWithManager of this reconciler registers the field indexes the resolver needs.
 	Expect((&controller.CollectorGroupBindingReconciler{Client: h.mgr.GetClient(), Scheme: h.mgr.GetScheme()}).SetupWithManager(h.mgr)).To(Succeed())
 
 	var mgrCtx context.Context

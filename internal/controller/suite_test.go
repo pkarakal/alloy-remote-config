@@ -82,31 +82,7 @@ var _ = BeforeSuite(func() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 
-	indexer := mgr.GetFieldIndexer()
-	Expect(indexer.IndexField(ctx, &fleetv1alpha1.CollectorGroupBinding{}, IndexTenantRef,
-		func(obj client.Object) []string {
-			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
-			if b.Spec.TenantRef == "" {
-				return nil
-			}
-			return []string{b.Spec.TenantRef}
-		},
-	)).To(Succeed())
-	Expect(indexer.IndexField(ctx, &fleetv1alpha1.CollectorGroupBinding{}, IndexCollectorGroupRef,
-		func(obj client.Object) []string {
-			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
-			if b.Spec.CollectorGroupRef == "" {
-				return nil
-			}
-			return []string{b.Spec.CollectorGroupRef}
-		},
-	)).To(Succeed())
-	Expect(indexer.IndexField(ctx, &fleetv1alpha1.CollectorGroupBinding{}, IndexPipelineConfigRef,
-		func(obj client.Object) []string {
-			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
-			return []string{b.Spec.PipelineConfigRef}
-		},
-	)).To(Succeed())
+	Expect(SetupIndexes(ctx, mgr)).To(Succeed())
 
 	mgrClient = mgr.GetClient()
 

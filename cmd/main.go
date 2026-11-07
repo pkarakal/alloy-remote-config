@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"net/http"
@@ -183,6 +184,11 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
+		os.Exit(1)
+	}
+
+	if err := controller.SetupIndexes(context.Background(), mgr); err != nil {
+		setupLog.Error(err, "Failed to set up field indexes")
 		os.Exit(1)
 	}
 

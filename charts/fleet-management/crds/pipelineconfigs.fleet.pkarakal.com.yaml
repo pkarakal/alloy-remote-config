@@ -1,3 +1,4 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -65,6 +66,8 @@ spec:
                   ActiveBindings is the number of CollectorGroupBindings currently
                   referencing this PipelineConfig. Check this field before modifying
                   or deleting the config to understand the blast radius of the change.
+                  It is derived from the bindings on every reconcile and self-heals.
+                minimum: 0
                 type: integer
               conditions:
                 description: |-

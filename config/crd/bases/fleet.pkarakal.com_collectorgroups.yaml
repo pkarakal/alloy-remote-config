@@ -53,6 +53,8 @@ spec:
                   ActiveBindings is the number of CollectorGroupBindings currently
                   referencing this CollectorGroup. Check this field before deleting
                   the group to understand which bindings would be left dangling.
+                  It is derived from the bindings on every reconcile and self-heals.
+                minimum: 0
                 type: integer
               observedGeneration:
                 format: int64
