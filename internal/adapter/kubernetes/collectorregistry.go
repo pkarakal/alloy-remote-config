@@ -17,10 +17,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
-	"github.com/pkarakal/alloy-remote-config/internal/controller"
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/port"
-	"github.com/pkarakal/alloy-remote-config/internal/selection"
 )
 
 const (
@@ -41,6 +39,7 @@ const (
 type CollectorRegistry struct {
 	client    client.Client
 	reader    client.Reader
+	selector  *bindingSelector
 	namespace string
 
 	throttleInterval time.Duration
@@ -92,6 +91,7 @@ func NewKubernetesCollectorRegistry(
 	r := &CollectorRegistry{
 		client:           c,
 		reader:           reader,
+		selector:         newBindingSelector(c),
 		namespace:        namespace,
 		throttleInterval: defaultThrottleInterval,
 		now:              time.Now,
@@ -104,8 +104,7 @@ func NewKubernetesCollectorRegistry(
 
 // Register upserts the tenant identified by info.LocalAttributes["tenant"] into
 // the status.registeredTenants of the matching CollectorGroupBinding, always
-// writing. Tenant-specific bindings take priority over group-wide bindings,
-// mirroring the config resolution fallback chain.
+// writing. The binding is the one config resolution picks (see findBinding).
 // If no binding is found, the call is a no-op; collectors may come online
 // before their bindings are created.
 func (r *CollectorRegistry) Register(ctx context.Context, info port.CollectorInfo) error {
@@ -128,9 +127,8 @@ func (r *CollectorRegistry) upsert(ctx context.Context, info port.CollectorInfo,
 			"collectorID", info.ID)
 		return nil
 	}
-	collectorGroup := info.LocalAttributes["collector_group"]
 
-	binding, err := r.findBinding(ctx, tenant, collectorGroup)
+	binding, err := r.findBinding(ctx, info.LocalAttributes)
 	if err != nil {
 		log.Error(err, "Failed to find binding for tenant", "tenant", tenant)
 		return err
@@ -267,36 +265,17 @@ func (r *CollectorRegistry) Unregister(ctx context.Context, id string) error {
 	return nil
 }
 
-// findBinding returns the CollectorGroupBinding that should receive the tenant's
-// registration. Tenant-specific bindings take priority over group-wide bindings.
+// findBinding returns the CollectorGroupBinding that should receive the
+// collector's registration: the same binding config resolution picks (shared
+// code path), ignoring whether its PipelineConfig is ready.
 func (r *CollectorRegistry) findBinding(
-	ctx context.Context, tenant, collectorGroup string,
+	ctx context.Context, attrs map[string]string,
 ) (*fleetv1alpha1.CollectorGroupBinding, error) {
-	if tenant != "" {
-		list := &fleetv1alpha1.CollectorGroupBindingList{}
-		if err := r.client.List(ctx, list,
-			client.InNamespace(r.namespace),
-			client.MatchingFields{controller.IndexTenantRef: tenant},
-		); err != nil {
-			return nil, fmt.Errorf("listing tenant bindings: %w", err)
-		}
-		if len(list.Items) > 0 {
-			return selection.Pick(list.Items), nil
-		}
+	d, err := r.selector.decide(ctx, r.namespace, attrs, nil)
+	if err != nil {
+		return nil, err
 	}
-	if collectorGroup != "" {
-		list := &fleetv1alpha1.CollectorGroupBindingList{}
-		if err := r.client.List(ctx, list,
-			client.InNamespace(r.namespace),
-			client.MatchingFields{controller.IndexCollectorGroupRef: collectorGroup},
-		); err != nil {
-			return nil, fmt.Errorf("listing group bindings: %w", err)
-		}
-		if len(list.Items) > 0 {
-			return selection.Pick(list.Items), nil
-		}
-	}
-	return nil, nil
+	return d.Binding, nil
 }
 
 // upsertTenant updates an existing entry matching t.ID or appends a new one.

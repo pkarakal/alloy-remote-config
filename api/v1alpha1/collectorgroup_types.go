@@ -12,6 +12,17 @@ type CollectorGroupSpec struct {
 	// Human-readable description of what this group represents
 	// e.g. "Production tenants running the core streaming pipeline"
 	Description string `json:"description,omitempty"`
+
+	// Matchers define membership by collector attributes, in addition to the
+	// legacy rule (attribute collector_group equals this group's name).
+	// Each item is `key OP "value"` with OP one of =, !=, =~, !~. Regexes are
+	// fully anchored, a missing attribute equals "", and all matchers must match.
+	// Example: org_id="org-1234", cluster_id=~"c-1|c-2".
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=200
+	// +kubebuilder:validation:items:XValidation:rule="self.matches('^[a-zA-Z_][a-zA-Z0-9_.]*\\\\s*(=|!=|=~|!~)\\\\s*\".*\"$')",message="matcher must look like key=\"value\" (operators: =, !=, =~, !~)"
+	Matchers []string `json:"matchers,omitempty"`
 }
 
 // CollectorGroupStatus defines the observed state of CollectorGroup.
@@ -24,7 +35,16 @@ type CollectorGroupStatus struct {
 	ActiveBindings int `json:"activeBindings"`
 
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions contains the observed conditions of this group.
+	// MatchersValid: spec.matchers compile. It is only set when matchers are
+	//   present. When False the group contributes only legacy membership.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
+
+// ConditionTypeMatchersValid reports whether spec.matchers compiled.
+const ConditionTypeMatchersValid = "MatchersValid"
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

@@ -13,7 +13,7 @@ import (
 )
 
 // MetricsConfigResolver wraps a port.ConfigResolver and records resolution
-// metrics for each step in the fallback chain.
+// metrics labeled by the kind of the winning candidate.
 type MetricsConfigResolver struct {
 	inner   port.ConfigResolver
 	metrics *metrics.ResolutionMetrics
@@ -27,32 +27,22 @@ func NewMetricsConfigResolver(inner port.ConfigResolver, m *metrics.ResolutionMe
 	return &MetricsConfigResolver{inner: inner, metrics: m}
 }
 
-func (m *MetricsConfigResolver) ResolveByTenant(ctx context.Context, namespace, tenant string) (*port.ResolvedConfig, error) {
-	return m.observe("tenant", func() (*port.ResolvedConfig, error) {
-		return m.inner.ResolveByTenant(ctx, namespace, tenant)
-	})
-}
-
-func (m *MetricsConfigResolver) ResolveByCollectorGroup(ctx context.Context, namespace, collectorGroup string) (*port.ResolvedConfig, error) {
-	return m.observe("collectorgroup", func() (*port.ResolvedConfig, error) {
-		return m.inner.ResolveByCollectorGroup(ctx, namespace, collectorGroup)
-	})
-}
-
-func (m *MetricsConfigResolver) ResolveDefault(ctx context.Context, namespace string) (*port.ResolvedConfig, error) {
-	return m.observe("default", func() (*port.ResolvedConfig, error) {
-		return m.inner.ResolveDefault(ctx, namespace)
-	})
-}
-
-func (m *MetricsConfigResolver) observe(resolutionPath string, fn func() (*port.ResolvedConfig, error)) (*port.ResolvedConfig, error) {
+// Resolve records one observation per request, labeled with the kind of the
+// winning candidate so existing dashboards keep working.
+func (m *MetricsConfigResolver) Resolve(ctx context.Context, namespace string, attrs map[string]string) (*port.ResolvedConfig, error) {
 	start := time.Now()
-	result, err := fn()
+	result, err := m.inner.Resolve(ctx, namespace, attrs)
 	elapsed := time.Since(start).Seconds()
 
+	path := port.PathDefault
+	if result != nil {
+		path = result.Path
+	} else if re := (*port.ResolveError)(nil); errors.As(err, &re) {
+		path = re.Path
+	}
 	outcome := classifyOutcome(err)
-	m.metrics.Total.WithLabelValues(resolutionPath, outcome).Inc()
-	m.metrics.Duration.WithLabelValues(resolutionPath, outcome).Observe(elapsed)
+	m.metrics.Total.WithLabelValues(path, outcome).Inc()
+	m.metrics.Duration.WithLabelValues(path, outcome).Observe(elapsed)
 
 	return result, err
 }

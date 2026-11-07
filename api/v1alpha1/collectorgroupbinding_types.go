@@ -28,6 +28,14 @@ type CollectorGroupBindingSpec struct {
 	// to collectors matched by this binding.
 	// +required
 	PipelineConfigRef string `json:"pipelineConfigRef"`
+
+	// Priority ranks this binding against others that match the same
+	// collector; the highest wins. When unset it defaults to 200 for tenant
+	// bindings and 100 for group bindings.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000
+	Priority *int32 `json:"priority,omitempty"`
 }
 
 // RegisteredTenant records a tenant that has called RegisterCollector and has
@@ -88,6 +96,11 @@ type CollectorGroupBindingStatus struct {
 	// from the spec refs.
 	BoundCollectorGroupRef string `json:"boundCollectorGroupRef,omitempty"`
 
+	// EffectivePriority is spec.priority, or the default for the binding kind
+	// (200 for tenant bindings, 100 for group bindings) when unset.
+	// +optional
+	EffectivePriority int32 `json:"effectivePriority,omitempty"`
+
 	// RegisteredTenants is the list of tenants currently registered against
 	// this binding. Entries are upserted on RegisterCollector and removed on
 	// UnregisterCollector or when the entry has not been refreshed within the
@@ -121,7 +134,9 @@ const (
 	ConditionTypeRefsValid = "RefsValid"
 
 	// ConditionTypeOverlap is True on a binding that loses to an older binding
-	// with the same tenantRef or collectorGroupRef in the same namespace.
+	// with the same tenantRef or collectorGroupRef and the same effective
+	// priority in the same namespace. Different priorities are an explicit
+	// ranking, not an overlap.
 	ConditionTypeOverlap = "Overlap"
 )
 
@@ -133,6 +148,7 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Config",type="string",JSONPath=".spec.pipelineConfigRef"
+// +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".status.effectivePriority"
 // +kubebuilder:printcolumn:name="Hash",type="string",JSONPath=".status.configHash"
 // +kubebuilder:printcolumn:name="Synced",type="date",JSONPath=".status.lastSyncedAt"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

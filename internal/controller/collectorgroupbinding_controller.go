@@ -26,6 +26,7 @@ import (
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
+	"github.com/pkarakal/alloy-remote-config/internal/resolution"
 	"github.com/pkarakal/alloy-remote-config/internal/selection"
 )
 
@@ -120,6 +121,7 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 	groupBinding.Status.ConfigHash = pipelineConfig.Status.ContentHash
 	groupBinding.Status.Phase = derivePhase(groupBinding.Status.Conditions)
 	groupBinding.Status.ObservedGeneration = groupBinding.Generation
+	groupBinding.Status.EffectivePriority = resolution.EffectivePriority(groupBinding)
 
 	// Skip no-op writes: each status write triggers another reconcile and the
 	// registry already writes this object on heartbeats. LastSyncedAt must not
@@ -160,13 +162,13 @@ func (r *CollectorGroupBindingReconciler) setOverlapCondition(
 	if winner != nil && winner.Name != b.Name {
 		cond.Status = metav1.ConditionTrue
 		cond.Reason = "DuplicateTarget"
-		cond.Message = fmt.Sprintf("Binding %q was created first and wins for the same target", winner.Name)
+		cond.Message = fmt.Sprintf("Binding %q has the same target and priority, and wins the tie-break", winner.Name)
 	}
 	meta.SetStatusCondition(&b.Status.Conditions, cond)
 }
 
-// winningBinding returns the binding that selection picks among all bindings
-// sharing b's target, which is b itself when it is the only one.
+// winningBinding returns the binding that resolution picks among all bindings
+// sharing b's target and effective priority, which is b itself when it is alone.
 func (r *CollectorGroupBindingReconciler) winningBinding(
 	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
 ) (*fleetv1alpha1.CollectorGroupBinding, error) {
@@ -182,6 +184,10 @@ func (r *CollectorGroupBindingReconciler) winningBinding(
 	if !slices.ContainsFunc(list.Items, func(o fleetv1alpha1.CollectorGroupBinding) bool { return o.Name == b.Name }) {
 		list.Items = append(list.Items, *b)
 	}
+	prio := resolution.EffectivePriority(b)
+	list.Items = slices.DeleteFunc(list.Items, func(o fleetv1alpha1.CollectorGroupBinding) bool {
+		return resolution.EffectivePriority(&o) != prio
+	})
 	return selection.Pick(list.Items), nil
 }
 
@@ -364,7 +370,8 @@ func (r *CollectorGroupBindingReconciler) bindingTargetHandler() handler.EventHa
 			oldB, okOld := e.ObjectOld.(*fleetv1alpha1.CollectorGroupBinding)
 			newB, okNew := e.ObjectNew.(*fleetv1alpha1.CollectorGroupBinding)
 			if okOld && okNew && (oldB.Spec.TenantRef != newB.Spec.TenantRef ||
-				oldB.Spec.CollectorGroupRef != newB.Spec.CollectorGroupRef) {
+				oldB.Spec.CollectorGroupRef != newB.Spec.CollectorGroupRef ||
+				resolution.EffectivePriority(oldB) != resolution.EffectivePriority(newB)) {
 				enqueue(ctx, q, oldB)
 				enqueue(ctx, q, newB)
 			}

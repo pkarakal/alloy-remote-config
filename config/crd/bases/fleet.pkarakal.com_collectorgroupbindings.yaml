@@ -21,6 +21,9 @@ spec:
     - jsonPath: .spec.pipelineConfigRef
       name: Config
       type: string
+    - jsonPath: .status.effectivePriority
+      name: Priority
+      type: integer
     - jsonPath: .status.configHash
       name: Hash
       type: string
@@ -68,6 +71,15 @@ spec:
                   PipelineConfigRef is the name of the PipelineConfig to serve
                   to collectors matched by this binding.
                 type: string
+              priority:
+                description: |-
+                  Priority ranks this binding against others that match the same
+                  collector; the highest wins. When unset it defaults to 200 for tenant
+                  bindings and 100 for group bindings.
+                format: int32
+                maximum: 1000
+                minimum: 0
+                type: integer
               tenantRef:
                 description: |-
                   TenantRef is the tenant ID of a specific collector to target.
@@ -166,6 +178,12 @@ spec:
                   field in GetConfigResponse — compare against remotecfg_* metrics
                   to verify collectors have picked up the latest config.
                 type: string
+              effectivePriority:
+                description: |-
+                  EffectivePriority is spec.priority, or the default for the binding kind
+                  (200 for tenant bindings, 100 for group bindings) when unset.
+                format: int32
+                type: integer
               lastSyncedAt:
                 description: |-
                   LastSyncedAt is the time at which the operator last successfully

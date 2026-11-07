@@ -73,7 +73,7 @@ func (s *CollectorService) GetConfig(
 			"collectorID", msg.GetId(), "err", err)
 	}
 
-	resolved, err := s.resolveConfig(ctx, tenant, collectorGroup)
+	resolved, err := s.resolveConfig(ctx, msg.GetLocalAttributes())
 	if err != nil {
 		return nil, err
 	}
@@ -96,29 +96,9 @@ func (s *CollectorService) GetConfig(
 	}), nil
 }
 
-// resolveConfig walks the fallback chain: tenant -> collector group -> default.
-func (s *CollectorService) resolveConfig(ctx context.Context, tenant, collectorGroup string) (*port.ResolvedConfig, error) {
-	if tenant != "" {
-		resolved, err := s.resolver.ResolveByTenant(ctx, s.namespace, tenant)
-		if err == nil {
-			return resolved, nil
-		}
-		if !errors.Is(err, port.ErrConfigNotFound) {
-			return nil, s.mapError(ctx, err)
-		}
-	}
-
-	if collectorGroup != "" {
-		resolved, err := s.resolver.ResolveByCollectorGroup(ctx, s.namespace, collectorGroup)
-		if err == nil {
-			return resolved, nil
-		}
-		if !errors.Is(err, port.ErrConfigNotFound) {
-			return nil, s.mapError(ctx, err)
-		}
-	}
-
-	resolved, err := s.resolver.ResolveDefault(ctx, s.namespace)
+// resolveConfig asks the resolver for the winning candidate for these attributes.
+func (s *CollectorService) resolveConfig(ctx context.Context, attrs map[string]string) (*port.ResolvedConfig, error) {
+	resolved, err := s.resolver.Resolve(ctx, s.namespace, attrs)
 	if err != nil {
 		return nil, s.mapError(ctx, err)
 	}

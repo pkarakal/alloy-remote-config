@@ -705,6 +705,78 @@ var _ = Describe("CollectorGroupBinding Overlap condition", func() {
 		Entry("same collectorGroupRef", fleetv1alpha1.CollectorGroupBindingSpec{CollectorGroupRef: "overlap-group"}),
 	)
 
+	Context("with explicit priorities", func() {
+		prio := func(v int32) *int32 { return &v }
+		bindingOf := func(name string) *fleetv1alpha1.CollectorGroupBinding {
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, keyOf(name), b)).To(Succeed())
+			return b
+		}
+		syncReconcile := func(r *CollectorGroupBindingReconciler, names ...string) {
+			Eventually(func(g Gomega) {
+				for _, n := range names {
+					g.Expect(mgrClient.Get(ctx, keyOf(n), &fleetv1alpha1.CollectorGroupBinding{})).To(Succeed())
+				}
+			}).Should(Succeed())
+			for _, n := range names {
+				reconcileUntilDone(r, n)
+			}
+		}
+
+		It("does not flag different priorities as an overlap and reports the effective priority", func() {
+			r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+			create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-prio", Priority: prio(300)})
+			create("overlap-b", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-prio"})
+			syncReconcile(r, "overlap-a", "overlap-b")
+
+			Expect(overlapOf("overlap-a").Status).To(Equal(metav1.ConditionFalse))
+			Expect(overlapOf("overlap-b").Status).To(Equal(metav1.ConditionFalse))
+			Expect(bindingOf("overlap-a").Status.EffectivePriority).To(Equal(int32(300)))
+			Expect(bindingOf("overlap-b").Status.EffectivePriority).To(Equal(int32(200)))
+		})
+
+		It("flags the loser when explicit priorities are equal", func() {
+			r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+			create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{CollectorGroupRef: "overlap-group", Priority: prio(300)})
+			create("overlap-b", fleetv1alpha1.CollectorGroupBindingSpec{CollectorGroupRef: "overlap-group", Priority: prio(300)})
+			a, b := bindingOf("overlap-a"), bindingOf("overlap-b")
+			winner, loser := "overlap-a", "overlap-b"
+			if selection.Older(b, a) {
+				winner, loser = loser, winner
+			}
+			syncReconcile(r, "overlap-a", "overlap-b")
+
+			Expect(overlapOf(winner).Status).To(Equal(metav1.ConditionFalse))
+			Expect(overlapOf(loser).Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("clears the overlap when a peer's priority changes", func() {
+			r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+			create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-flip"})
+			create("overlap-b", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-flip"})
+			a, b := bindingOf("overlap-a"), bindingOf("overlap-b")
+			loser := "overlap-b"
+			if selection.Older(b, a) {
+				loser = "overlap-a"
+			}
+			syncReconcile(r, "overlap-a", "overlap-b")
+			Expect(overlapOf(loser).Status).To(Equal(metav1.ConditionTrue))
+
+			By("ranking the loser explicitly higher")
+			Eventually(func(g Gomega) {
+				l := bindingOf(loser)
+				l.Spec.Priority = prio(500)
+				g.Expect(k8sClient.Update(ctx, l)).To(Succeed())
+			}).Should(Succeed())
+			Eventually(func(g Gomega) {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: keyOf(loser)})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(overlapOf(loser).Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(bindingOf(loser).Status.EffectivePriority).To(Equal(int32(500)))
+			}).Should(Succeed())
+		})
+	})
+
 	It("fans out to the other bindings sharing a target", func() {
 		r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
 		create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-fan"})
