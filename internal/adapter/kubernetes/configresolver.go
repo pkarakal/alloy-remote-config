@@ -5,14 +5,17 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/composition"
 	"github.com/pkarakal/alloy-remote-config/internal/port"
 	"github.com/pkarakal/alloy-remote-config/internal/resolution"
 	"github.com/pkarakal/alloy-remote-config/internal/selection"
@@ -28,14 +31,27 @@ type ConfigResolver struct {
 
 var _ port.ConfigResolver = (*ConfigResolver)(nil)
 
+// ResolverOption customizes a ConfigResolver.
+type ResolverOption func(*ConfigResolver)
+
+// WithResolverClock overrides the expiry clock, for tests.
+func WithResolverClock(now func() time.Time) ResolverOption {
+	return func(r *ConfigResolver) { r.selector.now = now }
+}
+
 // NewConfigResolver creates a ConfigResolver backed by the given client.Reader
 // (typically mgr.GetClient(), which reads from the informer cache).
-func NewConfigResolver(c client.Reader) *ConfigResolver {
-	return &ConfigResolver{client: c, selector: newBindingSelector(c)}
+func NewConfigResolver(c client.Reader, opts ...ResolverOption) *ConfigResolver {
+	r := &ConfigResolver{client: c, selector: newBindingSelector(c)}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Resolve ranks the tenant bindings, the bindings of every group the collector
-// belongs to, and the default config; the winner decides.
+// belongs to, and the default config; the winner decides. Additive bindings
+// are then appended to the winner's config (see compose).
 func (r *ConfigResolver) Resolve(ctx context.Context, namespace string, attrs map[string]string) (*port.ResolvedConfig, error) {
 	var defaults []fleetv1alpha1.PipelineConfig
 	decision, err := r.selector.decide(ctx, namespace, attrs, func(ctx context.Context) (bool, error) {
@@ -47,6 +63,25 @@ func (r *ConfigResolver) Resolve(ctx context.Context, namespace string, attrs ma
 		return nil, err
 	}
 
+	base, err := r.resolveBase(ctx, namespace, decision, defaults)
+	if err != nil {
+		// Additives alone are served only when there is no base at all; a
+		// failing base keeps failing so additives never mask it.
+		if len(decision.Additives) == 0 || !errors.Is(err, port.ErrConfigNotFound) {
+			return nil, err
+		}
+		base = nil
+	}
+	if len(decision.Additives) == 0 {
+		return base, nil
+	}
+	return r.compose(ctx, namespace, base, decision.Additives)
+}
+
+// resolveBase returns the config of the Replace winner or the default.
+func (r *ConfigResolver) resolveBase(
+	ctx context.Context, namespace string, decision resolution.Decision, defaults []fleetv1alpha1.PipelineConfig,
+) (*port.ResolvedConfig, error) {
 	switch decision.Kind {
 	case resolution.KindTenant, resolution.KindGroup:
 		return r.resolveBinding(ctx, namespace, decision)
@@ -65,6 +100,48 @@ func (r *ConfigResolver) Resolve(ctx context.Context, namespace string, attrs ma
 	default:
 		return nil, &port.ResolveError{Path: port.PathDefault, Err: port.ErrConfigNotFound}
 	}
+}
+
+// compose appends the usable additives to base (nil when there is no base).
+// Whenever composing is not possible it serves the base as it was, because an
+// additive must never change base serving.
+func (r *ConfigResolver) compose(
+	ctx context.Context, namespace string, base *port.ResolvedConfig, additives []*fleetv1alpha1.CollectorGroupBinding,
+) (*port.ResolvedConfig, error) {
+	log := logf.FromContext(ctx)
+	contribs, err := r.selector.contributing(ctx, namespace, additives)
+	if err != nil {
+		log.Error(err, "Failed to load additive pipelines, serving base config")
+		contribs = nil
+	}
+	parts := make([]composition.Additive, len(contribs))
+	for i, c := range contribs {
+		parts[i] = composition.Additive{BindingName: c.binding.Name, Content: c.content}
+	}
+	if len(parts) > 0 {
+		var baseContent, baseHash string
+		if base != nil {
+			baseContent, baseHash = base.Content, base.ContentHash
+		}
+		res := composition.Compose(baseContent, baseHash, parts)
+		first, perr := composition.CheckDocument(res.Hash, res.Content)
+		if perr == nil {
+			out := &port.ResolvedConfig{
+				Content: res.Content, ContentHash: res.Hash, Path: port.PathAdditive, Additives: res.Included,
+			}
+			if base != nil {
+				out.Path, out.BindingName = base.Path, base.BindingName
+			}
+			return out, nil
+		}
+		if first {
+			log.Error(perr, "Composed config did not parse, serving base config", "hash", res.Hash)
+		}
+	}
+	if base == nil {
+		return nil, &port.ResolveError{Path: port.PathAdditive, Err: port.ErrConfigNotFound}
+	}
+	return base, nil
 }
 
 func (r *ConfigResolver) listDefaults(ctx context.Context, namespace string) ([]fleetv1alpha1.PipelineConfig, error) {

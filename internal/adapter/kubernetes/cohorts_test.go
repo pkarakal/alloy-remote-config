@@ -146,15 +146,15 @@ var _ = Describe("Matcher cohorts and binding priority", func() {
 
 		registry := NewKubernetesCollectorRegistry(mgrClient, k8sClient, namespace)
 		Eventually(func(g Gomega) {
-			found, err := registry.findBinding(ctx, cohortAttrs)
+			found, err := registry.findBindings(ctx, cohortAttrs)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(found).NotTo(BeNil())
-			g.Expect(found.Name).To(Equal("cohort-canary"))
+			g.Expect(found).To(HaveLen(1))
+			g.Expect(found[0].Name).To(Equal("cohort-canary"))
 
-			found, err = registry.findBinding(ctx, otherAttrs)
+			found, err = registry.findBindings(ctx, otherAttrs)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(found).NotTo(BeNil())
-			g.Expect(found.Name).To(Equal("cohort-ten"))
+			g.Expect(found).To(HaveLen(1))
+			g.Expect(found[0].Name).To(Equal("cohort-ten"))
 		}).Should(Succeed())
 
 		Eventually(func(g Gomega) {

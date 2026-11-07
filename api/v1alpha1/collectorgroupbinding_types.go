@@ -38,7 +38,30 @@ type CollectorGroupBindingSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000
 	Priority *int32 `json:"priority,omitempty"`
+
+	// Mode says how the binding's PipelineConfig combines with others. Replace
+	// (the default when unset) competes for the base config by priority.
+	// Additive never competes: its content is appended to the base config as a
+	// self-contained declare block for every collector it targets.
+	// +optional
+	Mode BindingMode `json:"mode,omitempty"`
+
+	// ExpiresAt is the time after which the binding is no longer a candidate,
+	// in either mode. The object is never deleted automatically.
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 }
+
+// BindingMode selects how a binding's config combines with others.
+// +kubebuilder:validation:Enum=Replace;Additive
+type BindingMode string
+
+const (
+	// BindingModeReplace makes the binding compete for the base config.
+	BindingModeReplace BindingMode = "Replace"
+	// BindingModeAdditive appends the binding's config to the base config.
+	BindingModeAdditive BindingMode = "Additive"
+)
 
 // RegisteredTenant records a tenant that has called RegisterCollector and has
 // been matched to this binding. Entries are evicted by the reconciler when
@@ -192,6 +215,21 @@ const (
 	// priority in the same namespace. Different priorities are an explicit
 	// ranking, not an overlap.
 	ConditionTypeOverlap = "Overlap"
+
+	// ConditionTypeExpired is True once spec.expiresAt has passed. Only set
+	// when the binding has an expiresAt.
+	ConditionTypeExpired = "Expired"
+
+	// ConditionTypeCompositionValid is set on Additive bindings. It is False,
+	// with the parse error, when the wrapped content is not valid Alloy syntax;
+	// such a binding is left out of composed configs.
+	ConditionTypeCompositionValid = "CompositionValid"
+
+	// ConditionTypeNameCollision is set on Additive bindings. It is True when
+	// another Additive binding that sorts earlier by name derives the same
+	// declare label; this binding is then dropped from any composition that
+	// contains both.
+	ConditionTypeNameCollision = "NameCollision"
 )
 
 // +kubebuilder:object:root=true
@@ -202,7 +240,9 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Config",type="string",JSONPath=".spec.pipelineConfigRef"
+// +kubebuilder:printcolumn:name="Mode",type="string",JSONPath=".spec.mode"
 // +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".status.effectivePriority"
+// +kubebuilder:printcolumn:name="Expires",type="string",JSONPath=".spec.expiresAt"
 // +kubebuilder:printcolumn:name="Hash",type="string",JSONPath=".status.configHash"
 // +kubebuilder:printcolumn:name="Applied",type="integer",JSONPath=".status.appliedCount"
 // +kubebuilder:printcolumn:name="Failed",type="integer",JSONPath=".status.failedCount"

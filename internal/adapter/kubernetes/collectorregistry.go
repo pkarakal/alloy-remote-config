@@ -5,6 +5,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -99,12 +100,13 @@ func NewKubernetesCollectorRegistry(
 	for _, o := range opts {
 		o(r)
 	}
+	r.selector.now = func() time.Time { return r.now() }
 	return r
 }
 
 // Register upserts the tenant identified by info.LocalAttributes["tenant"] into
 // the status.registeredTenants of the matching CollectorGroupBinding, always
-// writing. The binding is the one config resolution picks (see findBinding).
+// writing. The binding is the one config resolution picks (see findBindings).
 // If no binding is found, the call is a no-op; collectors may come online
 // before their bindings are created.
 func (r *CollectorRegistry) Register(ctx context.Context, info port.CollectorInfo) error {
@@ -128,16 +130,32 @@ func (r *CollectorRegistry) upsert(ctx context.Context, info port.CollectorInfo,
 		return nil
 	}
 
-	binding, err := r.findBinding(ctx, info.LocalAttributes)
+	bindings, err := r.findBindings(ctx, info.LocalAttributes)
 	if err != nil {
 		log.Error(err, "Failed to find binding for tenant", "tenant", tenant)
 		return err
 	}
-	if binding == nil {
+	if len(bindings) == 0 {
 		log.V(1).Info("No binding found for tenant, skipping registration",
 			"tenant", tenant, "collectorID", info.ID)
 		return nil
 	}
+	// Record on every binding that shapes the served config, so apply status
+	// reaches the base and each contributing additive.
+	var errs []error
+	for _, binding := range bindings {
+		if err := r.upsertBinding(ctx, binding, tenant, info, throttle); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// upsertBinding writes the tenant entry into one binding's status.
+func (r *CollectorRegistry) upsertBinding(
+	ctx context.Context, binding *fleetv1alpha1.CollectorGroupBinding, tenant string, info port.CollectorInfo, throttle bool,
+) error {
+	log := logf.FromContext(ctx)
 	key := client.ObjectKeyFromObject(binding)
 
 	for attempt := range maxPatchRetries {
@@ -253,61 +271,93 @@ func (r *CollectorRegistry) Unregister(ctx context.Context, id string, scope por
 		return fmt.Errorf("listing CollectorGroupBindings: %w", err)
 	}
 
+	// With additive pipelines one collector can sit on several bindings, so
+	// remove it from every binding that holds it, not just the first.
+	var errs []error
+	removed := 0
 	for i := range list.Items {
 		if indexScopedTenant(list.Items[i].Status.RegisteredTenants, id, scope) < 0 {
 			continue
 		}
-		bindingKey := client.ObjectKeyFromObject(&list.Items[i])
-		for attempt := range maxPatchRetries {
-			if attempt > 0 {
-				sleepJitter(ctx, attempt)
-			}
-			// Always read live: the cached copy is what a conflict proves stale.
-			fresh := &fleetv1alpha1.CollectorGroupBinding{}
-			if err := r.reader.Get(ctx, bindingKey, fresh); err != nil {
-				if apierrors.IsNotFound(err) {
-					return nil
-				}
-				return fmt.Errorf("re-fetching CollectorGroupBinding %q: %w", bindingKey.Name, err)
-			}
-			idx := indexScopedTenant(fresh.Status.RegisteredTenants, id, scope)
-			if idx < 0 {
-				// Already removed by a concurrent call.
-				return nil
-			}
-			base := fresh.DeepCopy()
-			fresh.Status.RegisteredTenants = slices.Delete(fresh.Status.RegisteredTenants, idx, idx+1)
-			patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
-			if patchErr := r.client.Status().Patch(ctx, fresh, patch); patchErr != nil {
-				if apierrors.IsConflict(patchErr) {
-					log.V(1).Info("Conflict unregistering collector, retrying",
-						"collectorID", id, "binding", fresh.Name, "attempt", attempt+1)
-					continue
-				}
-				return fmt.Errorf("patching CollectorGroupBinding %q: %w", fresh.Name, patchErr)
-			}
-			log.Info("Unregistered collector from binding",
-				"collectorID", id, "binding", fresh.Name)
-			return nil
+		ok, err := r.unregisterFrom(ctx, client.ObjectKeyFromObject(&list.Items[i]), id, scope)
+		if err != nil {
+			errs = append(errs, err)
+			continue
 		}
-		return fmt.Errorf("failed to unregister collector %q after %d attempts", id, maxPatchRetries)
+		if ok {
+			removed++
+		}
 	}
 
-	log.V(1).Info("Collector not found in any binding during unregister", "collectorID", id)
-	return nil
+	if removed == 0 && len(errs) == 0 {
+		log.V(1).Info("Collector not found in any binding during unregister", "collectorID", id)
+	}
+	return errors.Join(errs...)
 }
 
-// findBinding returns the CollectorGroupBinding that should receive the
-// collector's registration: the same binding config resolution picks (shared
-// code path), ignoring whether its PipelineConfig is ready.
-func (r *CollectorRegistry) findBinding(
+// unregisterFrom removes the collector's entry from one binding, re-reading it
+// live on every attempt. It reports whether an entry was removed.
+func (r *CollectorRegistry) unregisterFrom(
+	ctx context.Context, key client.ObjectKey, id string, scope port.UnregisterScope,
+) (bool, error) {
+	log := logf.FromContext(ctx)
+	for attempt := range maxPatchRetries {
+		if attempt > 0 {
+			sleepJitter(ctx, attempt)
+		}
+		// Always read live: the cached copy is what a conflict proves stale.
+		fresh := &fleetv1alpha1.CollectorGroupBinding{}
+		if err := r.reader.Get(ctx, key, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("re-fetching CollectorGroupBinding %q: %w", key.Name, err)
+		}
+		idx := indexScopedTenant(fresh.Status.RegisteredTenants, id, scope)
+		if idx < 0 {
+			// Already removed by a concurrent call.
+			return false, nil
+		}
+		base := fresh.DeepCopy()
+		fresh.Status.RegisteredTenants = slices.Delete(fresh.Status.RegisteredTenants, idx, idx+1)
+		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+		if patchErr := r.client.Status().Patch(ctx, fresh, patch); patchErr != nil {
+			if apierrors.IsConflict(patchErr) {
+				log.V(1).Info("Conflict unregistering collector, retrying",
+					"collectorID", id, "binding", fresh.Name, "attempt", attempt+1)
+				continue
+			}
+			return false, fmt.Errorf("patching CollectorGroupBinding %q: %w", fresh.Name, patchErr)
+		}
+		log.Info("Unregistered collector from binding", "collectorID", id, "binding", fresh.Name)
+		return true, nil
+	}
+	return false, fmt.Errorf("failed to unregister collector %q from %q after %d attempts", id, key.Name, maxPatchRetries)
+}
+
+// findBindings returns the bindings that should receive the collector's
+// registration: the one config resolution picks as base (shared code path,
+// ignoring whether its PipelineConfig is ready) followed by every additive
+// that is composed into the served config.
+func (r *CollectorRegistry) findBindings(
 	ctx context.Context, attrs map[string]string,
-) (*fleetv1alpha1.CollectorGroupBinding, error) {
+) ([]*fleetv1alpha1.CollectorGroupBinding, error) {
 	d, err := r.selector.decide(ctx, r.namespace, attrs, nil)
 	if err != nil {
 		return nil, err
 	}
-	return d.Binding, nil
+	var out []*fleetv1alpha1.CollectorGroupBinding
+	if d.Binding != nil {
+		out = append(out, d.Binding)
+	}
+	contribs, err := r.selector.contributing(ctx, r.namespace, d.Additives)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range contribs {
+		out = append(out, c.binding)
+	}
+	return out, nil
 }
 
 // upsertTenant updates an existing entry matching t.ID or appends a new one.

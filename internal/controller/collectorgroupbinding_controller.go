@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/composition"
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/resolution"
 	"github.com/pkarakal/alloy-remote-config/internal/selection"
@@ -57,6 +58,15 @@ type CollectorGroupBindingReconciler struct {
 	CollectorTTL time.Duration
 	// Metrics holds optional controller-level Prometheus metrics. May be nil.
 	Metrics *metrics.ControllerMetrics
+	// Now is the clock for expiry; nil means time.Now.
+	Now func() time.Time
+}
+
+func (r *CollectorGroupBindingReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // +kubebuilder:rbac:groups=fleet.pkarakal.com,resources=collectorgroupbindings,verbs=get;list;watch;create;update;patch;delete
@@ -107,6 +117,10 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 	// Step 3.5 — Flag bindings that lose to a duplicate target
 	r.setOverlapCondition(ctx, groupBinding)
 
+	// Step 3.6 — Expiry and additive composition conditions
+	r.setExpiredCondition(groupBinding)
+	r.setCompositionConditions(ctx, groupBinding, pipelineConfig)
+
 	// Step 4.5 — Evict stale registered tenants
 	if evicted := r.evictStaleTenants(groupBinding); evicted > 0 {
 		log.Info("Evicted stale registered tenants", "count", evicted, "binding", groupBinding.Name)
@@ -136,10 +150,114 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, err
 		}
 	}
-	if r.CollectorTTL > 0 && len(groupBinding.Status.RegisteredTenants) > 0 {
-		return ctrl.Result{RequeueAfter: r.CollectorTTL / 2}, nil
+	return ctrl.Result{RequeueAfter: r.requeueAfter(groupBinding)}, nil
+}
+
+// requeueAfter returns the earlier of the eviction sweep and the expiry
+// moment, or zero when neither applies.
+func (r *CollectorGroupBindingReconciler) requeueAfter(b *fleetv1alpha1.CollectorGroupBinding) time.Duration {
+	var after time.Duration
+	if r.CollectorTTL > 0 && len(b.Status.RegisteredTenants) > 0 {
+		after = r.CollectorTTL / 2
 	}
-	return ctrl.Result{}, nil
+	if b.Spec.ExpiresAt != nil && !resolution.IsExpired(b, r.now()) {
+		untilExpiry := max(b.Spec.ExpiresAt.Sub(r.now()), time.Second)
+		if after == 0 || untilExpiry < after {
+			after = untilExpiry
+		}
+	}
+	return after
+}
+
+// setExpiredCondition reports whether spec.expiresAt has passed. Bindings
+// without an expiresAt carry no Expired condition.
+func (r *CollectorGroupBindingReconciler) setExpiredCondition(b *fleetv1alpha1.CollectorGroupBinding) {
+	if b.Spec.ExpiresAt == nil {
+		meta.RemoveStatusCondition(&b.Status.Conditions, fleetv1alpha1.ConditionTypeExpired)
+		return
+	}
+	cond := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeExpired,
+		Status:             metav1.ConditionFalse,
+		Reason:             "NotExpired",
+		Message:            "Binding expires at " + b.Spec.ExpiresAt.UTC().Format(time.RFC3339),
+		ObservedGeneration: b.Generation,
+	}
+	if resolution.IsExpired(b, r.now()) {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = "ExpiresAtPassed"
+		cond.Message = "Binding expired at " + b.Spec.ExpiresAt.UTC().Format(time.RFC3339) + " and is no longer a candidate"
+	}
+	meta.SetStatusCondition(&b.Status.Conditions, cond)
+}
+
+// setCompositionConditions sets CompositionValid and NameCollision on Additive
+// bindings and clears them on Replace bindings.
+func (r *CollectorGroupBindingReconciler) setCompositionConditions(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding, pc *fleetv1alpha1.PipelineConfig,
+) {
+	if !resolution.IsAdditive(b) {
+		meta.RemoveStatusCondition(&b.Status.Conditions, fleetv1alpha1.ConditionTypeCompositionValid)
+		meta.RemoveStatusCondition(&b.Status.Conditions, fleetv1alpha1.ConditionTypeNameCollision)
+		return
+	}
+	valid := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeCompositionValid,
+		Status:             metav1.ConditionTrue,
+		Reason:             "SyntaxValid",
+		Message:            "Content parses inside a declare block",
+		ObservedGeneration: b.Generation,
+	}
+	if err := composition.CheckSnippet(pc.Spec.Content); err != nil {
+		valid.Status = metav1.ConditionFalse
+		valid.Reason = "InvalidSyntax"
+		valid.Message = fleetv1alpha1.TruncateError(err.Error())
+	}
+	meta.SetStatusCondition(&b.Status.Conditions, valid)
+
+	collision := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeNameCollision,
+		Status:             metav1.ConditionFalse,
+		Reason:             "UniqueLabel",
+		Message:            "Declare label " + composition.Label(b.Name) + " is unique among additive bindings",
+		ObservedGeneration: b.Generation,
+	}
+	if winner, err := r.collidingBinding(ctx, b); err != nil {
+		logf.FromContext(ctx).Error(err, "Failed to list CollectorGroupBindings for collision check", "binding", b.Name)
+	} else if winner != "" {
+		collision.Status = metav1.ConditionTrue
+		collision.Reason = "DuplicateLabel"
+		collision.Message = fmt.Sprintf("Declare label %s is also derived from binding %q, which wins; this binding is dropped when both apply to a collector",
+			composition.Label(b.Name), winner)
+	}
+	meta.SetStatusCondition(&b.Status.Conditions, collision)
+}
+
+// collidingBinding returns the earlier-named live additive binding in the
+// namespace that derives the same label as b, or "". It cannot know which
+// collectors will see both, so it is a namespace-wide approximation.
+func (r *CollectorGroupBindingReconciler) collidingBinding(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
+) (string, error) {
+	if resolution.IsExpired(b, r.now()) {
+		return "", nil
+	}
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(b.Namespace)); err != nil {
+		return "", err
+	}
+	label := composition.Label(b.Name)
+	var winner string
+	for i := range list.Items {
+		o := &list.Items[i]
+		if o.Name == b.Name || !resolution.IsAdditive(o) || resolution.IsExpired(o, r.now()) || composition.Label(o.Name) != label {
+			continue
+		}
+		if o.Name < b.Name && (winner == "" || o.Name < winner) {
+			winner = o.Name
+		}
+	}
+	return winner, nil
 }
 
 // setOverlapCondition marks the binding as Overlap=True when another binding
@@ -149,6 +267,16 @@ func (r *CollectorGroupBindingReconciler) setOverlapCondition(
 	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
 ) {
 	log := logf.FromContext(ctx)
+	if resolution.IsAdditive(b) || resolution.IsExpired(b, r.now()) {
+		meta.SetStatusCondition(&b.Status.Conditions, metav1.Condition{
+			Type:               fleetv1alpha1.ConditionTypeOverlap,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NotCompeting",
+			Message:            "Additive and expired bindings do not compete for the base config",
+			ObservedGeneration: b.Generation,
+		})
+		return
+	}
 	winner, err := r.winningBinding(ctx, b)
 	if err != nil {
 		log.Error(err, "Failed to list CollectorGroupBindings for overlap check", "binding", b.Name)
@@ -188,7 +316,7 @@ func (r *CollectorGroupBindingReconciler) winningBinding(
 	}
 	prio := resolution.EffectivePriority(b)
 	list.Items = slices.DeleteFunc(list.Items, func(o fleetv1alpha1.CollectorGroupBinding) bool {
-		return resolution.EffectivePriority(&o) != prio
+		return resolution.EffectivePriority(&o) != prio || resolution.IsAdditive(&o) || resolution.IsExpired(&o, r.now())
 	})
 	return selection.Pick(list.Items), nil
 }
@@ -382,6 +510,31 @@ func (r *CollectorGroupBindingReconciler) enqueueBindingsSharingTarget(
 			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&o)})
 		}
 	}
+	return append(reqs, r.enqueueLabelPeers(ctx, b, reqs)...)
+}
+
+// enqueueLabelPeers maps an additive binding to the other additive bindings
+// that derive the same declare label, since their NameCollision may change
+// even when their targets differ. skip lists requests already enqueued.
+func (r *CollectorGroupBindingReconciler) enqueueLabelPeers(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding, skip []reconcile.Request,
+) []reconcile.Request {
+	if !resolution.IsAdditive(b) {
+		return nil
+	}
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(b.Namespace)); err != nil {
+		return nil
+	}
+	label := composition.Label(b.Name)
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		o := &list.Items[i]
+		req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(o)}
+		if o.Name != b.Name && resolution.IsAdditive(o) && composition.Label(o.Name) == label && !slices.Contains(skip, req) {
+			reqs = append(reqs, req)
+		}
+	}
 	return reqs
 }
 
@@ -407,7 +560,11 @@ func (r *CollectorGroupBindingReconciler) bindingTargetHandler() handler.EventHa
 			newB, okNew := e.ObjectNew.(*fleetv1alpha1.CollectorGroupBinding)
 			if okOld && okNew && (oldB.Spec.TenantRef != newB.Spec.TenantRef ||
 				oldB.Spec.CollectorGroupRef != newB.Spec.CollectorGroupRef ||
-				resolution.EffectivePriority(oldB) != resolution.EffectivePriority(newB)) {
+				resolution.EffectivePriority(oldB) != resolution.EffectivePriority(newB) ||
+				resolution.IsAdditive(oldB) != resolution.IsAdditive(newB) ||
+				!oldB.Spec.ExpiresAt.Equal(newB.Spec.ExpiresAt) ||
+				meta.IsStatusConditionTrue(oldB.Status.Conditions, fleetv1alpha1.ConditionTypeExpired) !=
+					meta.IsStatusConditionTrue(newB.Status.Conditions, fleetv1alpha1.ConditionTypeExpired)) {
 				enqueue(ctx, q, oldB)
 				enqueue(ctx, q, newB)
 			}

@@ -212,10 +212,10 @@ var _ = Describe("ConfigResolver", func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(resolved.Content).To(Equal(wantContent))
 
-				found, err := registry.findBinding(ctx, map[string]string{"tenant": "pick-tenant"})
+				foundAll, err := registry.findBindings(ctx, map[string]string{"tenant": "pick-tenant"})
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(found).NotTo(BeNil())
-				g.Expect(found.Name).To(Equal(winner))
+				g.Expect(foundAll).To(HaveLen(1))
+				g.Expect(foundAll[0].Name).To(Equal(winner))
 			}).Should(Succeed())
 		})
 
