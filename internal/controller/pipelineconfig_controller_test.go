@@ -11,9 +11,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
@@ -120,46 +122,50 @@ var _ = Describe("PipelineConfig Controller", func() {
 		})
 	})
 
-	Context("When reconciling a PipelineConfig with empty content", func() {
-		BeforeEach(func() {
-			By("creating a PipelineConfig with empty content")
-			resource := &fleetv1alpha1.PipelineConfig{
-				Name:      resourceName,
-				Namespace: namespace,
-				Spec: fleetv1alpha1.PipelineConfigSpec{
-					Content: "",
-				},
+	Context("When the CRD rejects blank content", func() {
+		DescribeTable("creating a PipelineConfig with blank content fails validation",
+			func(content string) {
+				err := k8sClient.Create(ctx, &fleetv1alpha1.PipelineConfig{
+					Name:      resourceName,
+					Namespace: namespace,
+					Spec:      fleetv1alpha1.PipelineConfigSpec{Content: content},
+				})
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
+			},
+			Entry("empty", ""),
+			Entry("whitespace", " \n\t"),
+		)
+	})
+
+	// Objects stored before the CEL rule persist thanks to validation
+	// ratcheting, so the API server cannot create them here; a fake client can.
+	DescribeTable("When reconciling a pre-existing PipelineConfig with blank content",
+		func(content string) {
+			pc := &fleetv1alpha1.PipelineConfig{
+				Name:       resourceName,
+				Namespace:  namespace,
+				Finalizers: []string{PipelineConfigFinalizer},
+				Spec:       fleetv1alpha1.PipelineConfigSpec{Content: content},
+				Status:     fleetv1alpha1.PipelineConfigStatus{ContentHash: "stale-hash"},
 			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		})
+			fc := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
+				WithObjects(pc).WithStatusSubresource(pc).Build()
+			r := &PipelineConfigReconciler{Client: fc, Scheme: fc.Scheme()}
 
-		AfterEach(cleanup)
-
-		It("should set ContentValid=False and not compute a hash", func() {
-			By("adding the finalizer first")
-			reconciler := newReconciler()
-			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("reconciling with empty content")
-			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			By("verifying ContentValid condition is False")
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, pc)).To(Succeed())
-			cond := meta.FindStatusCondition(pc.Status.Conditions, typeContentValidPipelineConfig)
+			got := &fleetv1alpha1.PipelineConfig{}
+			Expect(fc.Get(ctx, typeNamespacedName, got)).To(Succeed())
+			Expect(got.Status.ContentHash).To(BeEmpty(), "the stale hash must be cleared")
+			cond := meta.FindStatusCondition(got.Status.Conditions, typeContentValidPipelineConfig)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("EmptyContent"))
-
-			By("verifying no content hash is set")
-			Expect(pc.Status.ContentHash).To(BeEmpty())
-
-			By("verifying ObservedGeneration is set")
-			Expect(pc.Status.ObservedGeneration).To(Equal(pc.Generation))
-		})
-	})
+		},
+		Entry("empty", ""),
+		Entry("whitespace", "  \n\t "),
+	)
 
 	Context("When deleting a PipelineConfig", func() {
 		BeforeEach(func() {

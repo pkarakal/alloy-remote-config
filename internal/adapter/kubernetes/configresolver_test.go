@@ -10,9 +10,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
 	"github.com/pkarakal/alloy-remote-config/internal/port"
+	"github.com/pkarakal/alloy-remote-config/internal/selection"
 )
 
 var _ = Describe("ConfigResolver", func() {
@@ -154,4 +156,113 @@ var _ = Describe("ConfigResolver", func() {
 			}).Should(Succeed())
 		})
 	})
+
+	Context("dangling binding", func() {
+		AfterEach(func() {
+			cleanup("dangling-binding", "dangling-fallback")
+		})
+
+		It("should return ErrConfigNotReady when the referenced PipelineConfig is missing", func() {
+			createBinding("dangling-binding", "dangling-tenant", "", "does-not-exist")
+
+			resolver := NewConfigResolver(mgrClient)
+			Eventually(func(g Gomega) {
+				_, err := resolver.ResolveByTenant(ctx, namespace, "dangling-tenant")
+				g.Expect(err).To(MatchError(port.ErrConfigNotReady))
+				g.Expect(err.Error()).To(ContainSubstring("does-not-exist"))
+			}).Should(Succeed())
+		})
+	})
+
+	Context("deterministic selection", func() {
+		AfterEach(func() {
+			cleanup("pick-pc-a", "pick-pc-b", "pick-bind-a", "pick-bind-b", "default-a", "default-b")
+		})
+
+		// expectedWinner mirrors the documented rule on the stored timestamps, so
+		// the test holds whether or not creation crossed a second boundary.
+		expectedWinner := func(names ...string) string {
+			objs := make([]client.Object, 0, len(names))
+			for _, n := range names {
+				b := &fleetv1alpha1.CollectorGroupBinding{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: n, Namespace: namespace}, b)).To(Succeed())
+				objs = append(objs, b)
+			}
+			winner := objs[0]
+			for _, o := range objs[1:] {
+				if selection.Older(o, winner) {
+					winner = o
+				}
+			}
+			return winner.GetName()
+		}
+
+		It("should make the resolver and the registry pick the same binding", func() {
+			createPipelineConfig("pick-pc-a", "content a", nil)
+			createPipelineConfig("pick-pc-b", "content b", nil)
+			createBinding("pick-bind-b", "pick-tenant", "", "pick-pc-b")
+			createBinding("pick-bind-a", "pick-tenant", "", "pick-pc-a")
+			winner := expectedWinner("pick-bind-a", "pick-bind-b")
+			wantContent := map[string]string{"pick-bind-a": "content a", "pick-bind-b": "content b"}[winner]
+
+			resolver := NewConfigResolver(mgrClient)
+			registry := NewKubernetesCollectorRegistry(mgrClient, namespace)
+			Eventually(func(g Gomega) {
+				resolved, err := resolver.ResolveByTenant(ctx, namespace, "pick-tenant")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(resolved.Content).To(Equal(wantContent))
+
+				found, err := registry.findBinding(ctx, "pick-tenant", "")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).NotTo(BeNil())
+				g.Expect(found.Name).To(Equal(winner))
+			}).Should(Succeed())
+		})
+
+		It("should pick the same default PipelineConfig on every call", func() {
+			labels := map[string]string{fleetv1alpha1.LabelDefaultPipelineConfig: "true"}
+			createPipelineConfig("default-b", "default b", labels)
+			createPipelineConfig("default-a", "default a", labels)
+			names := map[string]string{"default-a": "default a", "default-b": "default b"}
+			var winner string
+			a, b := &fleetv1alpha1.PipelineConfig{}, &fleetv1alpha1.PipelineConfig{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "default-a", Namespace: namespace}, a)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "default-b", Namespace: namespace}, b)).To(Succeed())
+			winner = "default-a"
+			if selection.Older(b, a) {
+				winner = "default-b"
+			}
+
+			resolver := NewConfigResolver(mgrClient)
+			Eventually(func(g Gomega) {
+				for range 5 {
+					resolved, err := resolver.ResolveDefault(ctx, namespace)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(resolved.Content).To(Equal(names[winner]))
+				}
+			}).Should(Succeed())
+		})
+	})
+
+	DescribeTable("toPipelineResult",
+		func(content, hash string, wantErr error) {
+			pc := &fleetv1alpha1.PipelineConfig{
+				Spec:   fleetv1alpha1.PipelineConfigSpec{Content: content},
+				Status: fleetv1alpha1.PipelineConfigStatus{ContentHash: hash},
+			}
+			resolved, err := NewConfigResolver(nil).toPipelineResult(pc)
+			if wantErr != nil {
+				Expect(err).To(MatchError(wantErr))
+				Expect(resolved).To(BeNil())
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resolved.Content).To(Equal(content))
+			Expect(resolved.ContentHash).To(Equal(hash))
+		},
+		Entry("reconciled content", "real", "abc", nil),
+		Entry("no hash yet", "real", "", port.ErrConfigNotReady),
+		Entry("stale hash on empty content", "", "abc", port.ErrConfigNotReady),
+		Entry("stale hash on whitespace content", " \n\t", "abc", port.ErrConfigNotReady),
+	)
 })

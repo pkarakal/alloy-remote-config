@@ -1,7 +1,7 @@
 # Copyright 2026 Pavlos Karakalidis
 # SPDX-License-Identifier: MIT
-# acme-binding references a PipelineConfig that does not exist: CodeInternal today, no
-# fallthrough. WS-S intentionally changes this to Unavailable (justified golden diff).
+# acme-binding references a PipelineConfig that does not exist: Unavailable, with no
+# fallthrough to the group or default config.
 ---
 apiVersion: fleet.pkarakal.com/v1alpha1
 kind: PipelineConfig

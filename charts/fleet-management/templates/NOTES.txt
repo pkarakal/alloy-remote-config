@@ -7,6 +7,11 @@ The controller and CRDs have been installed. Verify the installation:
   kubectl get pods -n {{ .Release.Namespace }}
   kubectl get customresourcedefinitions | grep pkarakal.com
 
+Upgrading: Helm installs the files in crds/ only on the first install and never upgrades them. After upgrading the
+chart, apply the CRDs yourself:
+
+  kubectl apply --server-side -f charts/fleet-management/crds/
+
 {{- if .Values.service.enabled }}
 
 Connect-RPC API (alloy-remote-config endpoint)

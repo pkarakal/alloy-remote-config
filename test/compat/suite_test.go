@@ -178,9 +178,8 @@ func (h *harness) install(sc scenario) {
 	h.settle(ns)
 }
 
-// settle waits for every PipelineConfig in ns to be reconciled (hash set unless
-// the content is empty, which the controller never hashes) and for the cache
-// the resolver reads from to have caught up.
+// settle waits for every PipelineConfig in ns to be reconciled and hashed and
+// for the cache the resolver reads from to have caught up.
 func (h *harness) settle(ns string) {
 	GinkgoHelper()
 	pcs := &fleetv1alpha1.PipelineConfigList{}
@@ -191,9 +190,7 @@ func (h *harness) settle(ns string) {
 			live := &fleetv1alpha1.PipelineConfig{}
 			g.Expect(h.client.Get(ctx, key, live)).To(Succeed())
 			g.Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
-			if live.Spec.Content != "" {
-				g.Expect(live.Status.ContentHash).NotTo(BeEmpty())
-			}
+			g.Expect(live.Status.ContentHash).NotTo(BeEmpty())
 			cached := &fleetv1alpha1.PipelineConfig{}
 			g.Expect(h.mgr.GetClient().Get(ctx, key, cached)).To(Succeed())
 			g.Expect(cached.Status.ObservedGeneration).To(Equal(live.Generation))

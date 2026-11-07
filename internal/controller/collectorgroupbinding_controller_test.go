@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/selection"
 )
 
 var _ = Describe("CollectorGroupBinding Controller", func() {
@@ -617,5 +618,130 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(ttl / 2))
 		})
+	})
+})
+
+var _ = Describe("CollectorGroupBinding Overlap condition", func() {
+	const namespace = "default"
+	ctx := context.Background()
+
+	keyOf := func(name string) types.NamespacedName {
+		return types.NamespacedName{Name: name, Namespace: namespace}
+	}
+
+	create := func(name string, spec fleetv1alpha1.CollectorGroupBindingSpec) {
+		spec.PipelineConfigRef = "overlap-pc"
+		Expect(k8sClient.Create(ctx, &fleetv1alpha1.CollectorGroupBinding{
+			Name: name, Namespace: namespace, Spec: spec,
+		})).To(Succeed())
+	}
+
+	remove := func(name string) {
+		b := &fleetv1alpha1.CollectorGroupBinding{}
+		if err := k8sClient.Get(ctx, keyOf(name), b); err != nil {
+			return
+		}
+		b.Finalizers = nil
+		_ = k8sClient.Update(ctx, b)
+		_ = k8sClient.Delete(ctx, b)
+	}
+
+	BeforeEach(func() {
+		pc := &fleetv1alpha1.PipelineConfig{
+			Name: "overlap-pc", Namespace: namespace,
+			Spec: fleetv1alpha1.PipelineConfigSpec{Content: "logging {}"},
+		}
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		pc.Status.ContentHash = "overlap-hash"
+		Expect(k8sClient.Status().Update(ctx, pc)).To(Succeed())
+		// Group bindings need their CollectorGroup to pass ref validation.
+		Expect(k8sClient.Create(ctx, &fleetv1alpha1.CollectorGroup{Name: "overlap-group", Namespace: namespace})).To(Succeed())
+	})
+
+	AfterEach(func() {
+		_ = k8sClient.Delete(ctx, &fleetv1alpha1.CollectorGroup{Name: "overlap-group", Namespace: namespace})
+		remove("overlap-a")
+		remove("overlap-b")
+		pc := &fleetv1alpha1.PipelineConfig{}
+		if err := k8sClient.Get(ctx, keyOf("overlap-pc"), pc); err == nil {
+			pc.Finalizers = nil
+			_ = k8sClient.Update(ctx, pc)
+			_ = k8sClient.Delete(ctx, pc)
+		}
+	})
+
+	// reconcileUntilDone retries because the cache-backed client can serve a
+	// stale object (conflict) and the first pass only adds the finalizer.
+	overlapOf := func(name string) *metav1.Condition {
+		b := &fleetv1alpha1.CollectorGroupBinding{}
+		Expect(k8sClient.Get(ctx, keyOf(name), b)).To(Succeed())
+		return meta.FindStatusCondition(b.Status.Conditions, fleetv1alpha1.ConditionTypeOverlap)
+	}
+
+	reconcileUntilDone := func(r *CollectorGroupBindingReconciler, name string) {
+		Eventually(func(g Gomega) {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: keyOf(name)})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(overlapOf(name)).NotTo(BeNil())
+		}).Should(Succeed())
+	}
+
+	DescribeTable("marks only the loser and clears when the winner goes away",
+		func(spec fleetv1alpha1.CollectorGroupBindingSpec) {
+			r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+
+			create("overlap-a", spec)
+			create("overlap-b", spec)
+			// Compute the winner from stored timestamps; creation may span a second.
+			a, b := &fleetv1alpha1.CollectorGroupBinding{}, &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, keyOf("overlap-a"), a)).To(Succeed())
+			Expect(k8sClient.Get(ctx, keyOf("overlap-b"), b)).To(Succeed())
+			winner, loser := "overlap-a", "overlap-b"
+			if selection.Older(b, a) {
+				winner, loser = loser, winner
+			}
+
+			By("waiting for the cache-backed client to see both bindings")
+			Eventually(func(g Gomega) {
+				got, err := r.winningBinding(ctx, a)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(got.Name).To(Equal(winner))
+				g.Expect(mgrClient.Get(ctx, keyOf(loser), &fleetv1alpha1.CollectorGroupBinding{})).To(Succeed())
+			}).Should(Succeed())
+
+			reconcileUntilDone(r, winner)
+			reconcileUntilDone(r, loser)
+
+			Expect(overlapOf(winner).Status).To(Equal(metav1.ConditionFalse))
+			cond := overlapOf(loser)
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("DuplicateTarget"))
+			Expect(cond.Message).To(ContainSubstring(winner))
+
+			By("deleting the winner and reconciling the loser again")
+			remove(winner)
+			Eventually(func() error {
+				return mgrClient.Get(ctx, keyOf(winner), &fleetv1alpha1.CollectorGroupBinding{})
+			}).Should(Satisfy(apierrors.IsNotFound))
+			Eventually(func(g Gomega) {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: keyOf(loser)})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(overlapOf(loser).Status).To(Equal(metav1.ConditionFalse))
+			}).Should(Succeed())
+		},
+		Entry("same tenantRef", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-tenant"}),
+		Entry("same collectorGroupRef", fleetv1alpha1.CollectorGroupBindingSpec{CollectorGroupRef: "overlap-group"}),
+	)
+
+	It("fans out to the other bindings sharing a target", func() {
+		r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+		create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-fan"})
+		create("overlap-b", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-fan"})
+		a := &fleetv1alpha1.CollectorGroupBinding{}
+		Expect(k8sClient.Get(ctx, keyOf("overlap-a"), a)).To(Succeed())
+
+		Eventually(func() []reconcile.Request {
+			return r.enqueueBindingsSharingTarget(ctx, a)
+		}).Should(ConsistOf(reconcile.Request{NamespacedName: keyOf("overlap-b")}))
 	})
 })

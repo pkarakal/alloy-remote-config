@@ -72,7 +72,6 @@ func (s *CollectorService) GetConfig(
 
 	resolved, err := s.resolveConfig(ctx, tenant, collectorGroup)
 	if err != nil {
-		log.Error(err, "Failed to resolve config")
 		return nil, err
 	}
 
@@ -127,12 +126,15 @@ func (s *CollectorService) resolveConfig(ctx context.Context, tenant, collectorG
 func (s *CollectorService) mapError(ctx context.Context, err error) *connect.Error {
 	log := logf.FromContext(ctx)
 	switch {
+	// Expected states are polled constantly, so keep them out of the error log.
 	case errors.Is(err, port.ErrConfigNotFound):
+		log.V(1).Info("No config found", "reason", err.Error())
 		return connect.NewError(connect.CodeNotFound, err)
 	case errors.Is(err, port.ErrConfigNotReady):
+		log.V(1).Info("Config not ready", "reason", err.Error())
 		return connect.NewError(connect.CodeUnavailable, err)
 	default:
-		log.Error(err, "Internal error during config resolution")
+		log.Error(err, "Failed to resolve config")
 		return connect.NewError(connect.CodeInternal, err)
 	}
 }
