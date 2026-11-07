@@ -4,7 +4,7 @@
 
 | Tool                                                                | Minimum version | Purpose                                     |
 |---------------------------------------------------------------------|-----------------|---------------------------------------------|
-| [Go](https://go.dev/dl/)                                            | 1.25            | Build and test                              |
+| [Go](https://go.dev/dl/)                                            | 1.27            | Build and test                              |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/)                  | 1.35            | Interact with the cluster                   |
 | [kubebuilder](https://book.kubebuilder.io/quick-start#installation) | 4.x             | Scaffold new APIs and controllers           |
 | [Kind](https://kind.sigs.k8s.io/)                                   | 0.20            | Local cluster for development and e2e tests |

@@ -54,10 +54,8 @@ var _ = Describe("PipelineConfig Controller", func() {
 		It("should return no error for a missing PipelineConfig", func() {
 			reconciler := newReconciler()
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      "nonexistent",
-					Namespace: namespace,
-				},
+				Name:      "nonexistent",
+				Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -70,10 +68,8 @@ var _ = Describe("PipelineConfig Controller", func() {
 			err := k8sClient.Get(ctx, typeNamespacedName, pc)
 			if err != nil {
 				resource := &fleetv1alpha1.PipelineConfig{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: namespace,
-					},
+					Name:      resourceName,
+					Namespace: namespace,
 					Spec: fleetv1alpha1.PipelineConfigSpec{
 						Content: "logging { level = \"info\" }",
 					},
@@ -128,10 +124,8 @@ var _ = Describe("PipelineConfig Controller", func() {
 		BeforeEach(func() {
 			By("creating a PipelineConfig with empty content")
 			resource := &fleetv1alpha1.PipelineConfig{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      resourceName,
-					Namespace: namespace,
-				},
+				Name:      resourceName,
+				Namespace: namespace,
 				Spec: fleetv1alpha1.PipelineConfigSpec{
 					Content: "",
 				},
@@ -171,11 +165,9 @@ var _ = Describe("PipelineConfig Controller", func() {
 		BeforeEach(func() {
 			By("creating the PipelineConfig with the finalizer already set")
 			resource := &fleetv1alpha1.PipelineConfig{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       resourceName,
-					Namespace:  namespace,
-					Finalizers: []string{PipelineConfigFinalizer},
-				},
+				Name:       resourceName,
+				Namespace:  namespace,
+				Finalizers: []string{PipelineConfigFinalizer},
 				Spec: fleetv1alpha1.PipelineConfigSpec{
 					Content: "logging { level = \"warn\" }",
 				},

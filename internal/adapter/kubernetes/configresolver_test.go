@@ -9,7 +9,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
@@ -38,11 +37,9 @@ var _ = Describe("ConfigResolver", func() {
 
 	createPipelineConfig := func(name, content string, labels map[string]string) {
 		pc := &fleetv1alpha1.PipelineConfig{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: namespace,
-				Labels:    labels,
-			},
+			Name:      name,
+			Namespace: namespace,
+			Labels:    labels,
 			Spec: fleetv1alpha1.PipelineConfigSpec{
 				Content: content,
 			},
@@ -56,10 +53,8 @@ var _ = Describe("ConfigResolver", func() {
 
 	createBinding := func(name string, tenantRef, collectorGroupRef, pipelineConfigRef string) {
 		binding := &fleetv1alpha1.CollectorGroupBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: namespace,
-			},
+			Name:      name,
+			Namespace: namespace,
 			Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 				TenantRef:         tenantRef,
 				CollectorGroupRef: collectorGroupRef,
@@ -143,11 +138,9 @@ var _ = Describe("ConfigResolver", func() {
 
 		It("should return ErrConfigNotReady when default exists but has no hash", func() {
 			pc := &fleetv1alpha1.PipelineConfig{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "default",
-					Namespace: namespace,
-					Labels:    map[string]string{fleetv1alpha1.LabelDefaultPipelineConfig: "true"},
-				},
+				Name:      "default",
+				Namespace: namespace,
+				Labels:    map[string]string{fleetv1alpha1.LabelDefaultPipelineConfig: "true"},
 				Spec: fleetv1alpha1.PipelineConfigSpec{
 					Content: "not yet reconciled",
 				},

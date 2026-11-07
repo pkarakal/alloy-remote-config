@@ -44,7 +44,7 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 
 	makeBinding := func(name, tenantRef, collectorGroupRef string) *fleetv1alpha1.CollectorGroupBinding {
 		b := &fleetv1alpha1.CollectorGroupBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Name: name, Namespace: namespace,
 			Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 				TenantRef:         tenantRef,
 				CollectorGroupRef: collectorGroupRef,

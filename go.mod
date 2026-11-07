@@ -1,6 +1,6 @@
 module github.com/pkarakal/alloy-remote-config
 
-go 1.25.3
+go 1.27.3
 
 require (
 	connectrpc.com/connect v1.19.1

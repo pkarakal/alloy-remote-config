@@ -38,6 +38,11 @@ type RPCMetrics struct {
 	NotModified prometheus.Counter
 }
 
+// rpcLabels are the label names shared by the RPC request counter and duration histogram.
+const labelCode = "code"
+
+var rpcLabels = []string{"procedure", labelCode}
+
 // NewRPCMetrics creates an initialised RPCMetrics instance ready to be registered.
 func NewRPCMetrics() *RPCMetrics {
 	return &RPCMetrics{
@@ -47,7 +52,7 @@ func NewRPCMetrics() *RPCMetrics {
 				Name:      "rpc_requests_total",
 				Help:      "Total number of Connect-RPC requests, partitioned by procedure and response status code.",
 			},
-			[]string{"procedure", "code"},
+			rpcLabels,
 		),
 		Duration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -56,7 +61,7 @@ func NewRPCMetrics() *RPCMetrics {
 				Help:      "Histogram of Connect-RPC request duration in seconds, partitioned by procedure and response status code.",
 				Buckets:   rpcDurationBuckets,
 			},
-			[]string{"procedure", "code"},
+			rpcLabels,
 		),
 		Served: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -121,7 +126,7 @@ func NewHTTPMetrics() *HTTPMetrics {
 				Name:      "http_requests_total",
 				Help:      "Total number of HTTP requests received by the Connect-RPC server, partitioned by method and status code.",
 			},
-			[]string{"method", "code"},
+			[]string{"method", labelCode},
 		),
 		RequestDuration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -130,7 +135,7 @@ func NewHTTPMetrics() *HTTPMetrics {
 				Help:      "Histogram of HTTP request duration in seconds for the Connect-RPC server, partitioned by method and HTTP status code.",
 				Buckets:   rpcDurationBuckets,
 			},
-			[]string{"method", "code"},
+			[]string{"method", labelCode},
 		),
 	}
 }
