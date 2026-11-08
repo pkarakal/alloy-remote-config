@@ -14,7 +14,14 @@ spec:
     singular: pipelineconfig
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='ContentValid')].status
+      name: Valid
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: PipelineConfig is the Schema for the pipelineconfigs API
@@ -42,8 +49,9 @@ spec:
               content:
                 description: |-
                   Content is the alloy pipeline configuration in raw format.
-                  It must not be empty or whitespace only. The syntax is not validated,
-                  so it is up to the tenant Alloys to report any syntax errors.
+                  It must not be empty or whitespace only. Syntax is checked according to
+                  the operator's --content-validation mode; unknown components and bad
+                  references are never checked here, Alloy reports those itself.
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
@@ -139,7 +147,18 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               contentHash:
-                description: ContentHash is the hash of the content field.
+                description: |-
+                  ContentHash is the sha256 hex digest of spec.content, in every
+                  validation mode.
+                type: string
+              lastValidContent:
+                description: |-
+                  LastValidContent is the last spec.content that parsed. It is only set
+                  when the operator runs with --content-validation=enforce, which serves
+                  it instead of an invalid edit.
+                type: string
+              lastValidHash:
+                description: LastValidHash is the sha256 hex digest of LastValidContent.
                 type: string
               observedGeneration:
                 description: |-
@@ -148,6 +167,13 @@ spec:
                   than metadata.generation, the current status reflects a previous
                   version of the spec and the reconciler has not yet processed the
                   latest changes.
+                format: int64
+                type: integer
+              validatedGeneration:
+                description: |-
+                  ValidatedGeneration is the generation the operator last checked under
+                  enforce. Zero means the object was never checked, which is how objects
+                  that predate enforce are told apart from new ones.
                 format: int64
                 type: integer
             required:

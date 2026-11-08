@@ -85,6 +85,19 @@ func checkSnippet(content string) error {
 	return nil
 }
 
+// CheckConfig reports whether content parses as a full Alloy config. It checks
+// syntax only: unknown components, bad arguments and broken references are not
+// caught here, Alloy reports those itself. The syntax module is versioned
+// separately from Alloy, so it can lag behind newer Alloy syntax. Results are
+// cached by content hash.
+func CheckConfig(content string) error {
+	_, err := cached(hashKey("c:", content), func() error {
+		_, perr := parser.ParseFile("content", []byte(content))
+		return perr
+	})
+	return err
+}
+
 // CheckDocument reports whether a composed document parses. hash identifies the
 // document. first is true the first time this hash is seen, so callers can log
 // a failure once.

@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,6 +18,7 @@ import (
 	"github.com/pkarakal/alloy-remote-config/internal/port"
 	"github.com/pkarakal/alloy-remote-config/internal/resolution"
 	"github.com/pkarakal/alloy-remote-config/internal/selection"
+	"github.com/pkarakal/alloy-remote-config/internal/validate"
 )
 
 // ConfigResolver implements port.ConfigResolver using the controller-runtime
@@ -27,6 +27,7 @@ import (
 type ConfigResolver struct {
 	client   client.Reader
 	selector *bindingSelector
+	mode     validate.Mode
 }
 
 var _ port.ConfigResolver = (*ConfigResolver)(nil)
@@ -37,6 +38,12 @@ type ResolverOption func(*ConfigResolver)
 // WithResolverClock overrides the expiry clock, for tests.
 func WithResolverClock(now func() time.Time) ResolverOption {
 	return func(r *ConfigResolver) { r.selector.now = now }
+}
+
+// WithContentValidation sets the content validation mode; enforce serves the
+// last valid content of each PipelineConfig. The default is off.
+func WithContentValidation(m validate.Mode) ResolverOption {
+	return func(r *ConfigResolver) { r.mode = m; r.selector.mode = m }
 }
 
 // NewConfigResolver creates a ConfigResolver backed by the given client.Reader
@@ -190,12 +197,9 @@ func (r *ConfigResolver) resolveBinding(ctx context.Context, namespace string, d
 // toPipelineResult converts a PipelineConfig into a ResolvedConfig, returning
 // ErrConfigNotReady if the config has not been reconciled yet.
 func (r *ConfigResolver) toPipelineResult(pc *fleetv1alpha1.PipelineConfig) (*port.ResolvedConfig, error) {
-	// Blank content can predate the CRD rule; never serve it.
-	if pc.Status.ContentHash == "" || strings.TrimSpace(pc.Spec.Content) == "" {
+	content, hash, ok := validate.Served(pc, r.mode)
+	if !ok {
 		return nil, port.ErrConfigNotReady
 	}
-	return &port.ResolvedConfig{
-		Content:     pc.Spec.Content,
-		ContentHash: pc.Status.ContentHash,
-	}, nil
+	return &port.ResolvedConfig{Content: content, ContentHash: hash}, nil
 }

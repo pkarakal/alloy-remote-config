@@ -6,7 +6,6 @@ package kubernetes
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +17,7 @@ import (
 	"github.com/pkarakal/alloy-remote-config/internal/composition"
 	"github.com/pkarakal/alloy-remote-config/internal/controller"
 	"github.com/pkarakal/alloy-remote-config/internal/resolution"
+	"github.com/pkarakal/alloy-remote-config/internal/validate"
 )
 
 // bindingSelector gathers candidates from the informer cache and ranks them
@@ -27,6 +27,8 @@ type bindingSelector struct {
 	reader client.Reader
 	// now is the expiry clock.
 	now func() time.Time
+	// mode decides which content of a PipelineConfig is served.
+	mode validate.Mode
 
 	mu sync.Mutex
 	// compiled caches parsed matchers per CollectorGroup UID and generation.
@@ -156,13 +158,11 @@ func (s *bindingSelector) contributing(
 			return nil, fmt.Errorf("fetching PipelineConfig %q for additive binding %q: %w",
 				b.Spec.PipelineConfigRef, b.Name, err)
 		}
-		if pc.Status.ContentHash == "" || strings.TrimSpace(pc.Spec.Content) == "" {
+		content, _, ok := validate.Served(pc, s.mode)
+		if !ok || composition.CheckSnippet(content) != nil {
 			continue
 		}
-		if composition.CheckSnippet(pc.Spec.Content) != nil {
-			continue
-		}
-		out = append(out, contribution{binding: b, content: pc.Spec.Content})
+		out = append(out, contribution{binding: b, content: content})
 	}
 	return out, nil
 }
