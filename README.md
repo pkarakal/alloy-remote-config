@@ -125,6 +125,61 @@ Deletion is blocked while `activeBindings > 0`. The count is derived from the bi
 Kubernetes 1.30 or newer. Such a blank object is treated as not ready: its `contentHash` is cleared and the API answers
 `Unavailable` instead of serving it.
 
+#### Content validation (new)
+
+The operator parses `spec.content` with the Alloy syntax parser. The mode is set with `--content-validation`
+(chart value `manager.contentValidation`), and the default is `enforce`:
+
+| Mode      | `ContentValid` condition | Admission webhook                         | What is served                                                                           |
+|-----------|--------------------------|-------------------------------------------|------------------------------------------------------------------------------------------|
+| `off`     | `True` for non-blank     | allows, no warnings                       | `spec.content`                                                                           |
+| `warn`    | `False`/`SyntaxError` with the parser message, or `True` | allows, with an admission warning | `spec.content`, even when invalid (Alloy then reports Failed and keeps its last good config) |
+| `enforce` | as `warn`                | rejects invalid `spec.content`            | the last valid content (`status.lastValidContent`), for base and additive configs        |
+
+`kubectl get pipelineconfigs` shows the condition in the `Valid` column. `status.contentHash` is the SHA-256 of
+`spec.content` in every mode.
+
+**What the check catches.** Syntax only: unterminated blocks, bad expressions, stray braces. It does not catch unknown
+components, wrong arguments or broken references; Alloy reports those itself (the binding shows `Failed`).
+The parser is a Go module versioned separately from Alloy (`github.com/grafana/alloy/syntax`), so it can lag behind a
+newer Alloy and flag syntax your Alloy accepts. In that case use `warn` or `off`, which keep serving the content.
+
+**Enforce keeps the last valid content.** Every valid parse is copied into `status.lastValidContent`/`lastValidHash`
+(with `status.validatedGeneration`). An invalid edit that gets past admission, for example while the webhook is down or
+disabled, leaves collectors on the previous valid content, new ones included. Content that was never valid answers
+`Unavailable`.
+
+- **Upgrade seeding.** An object that predates `enforce` and still parses is seeded with its current content. One that
+  does not parse keeps being served as is, and gets the condition `SeededUnvalidated=True`, so nothing that works today
+  stops working. A valid edit clears it.
+- **Size guard.** Content over 600 KiB is not copied into status (etcd rejects objects over about 1.5 MiB). Such an
+  object gets `ContentTooLarge=True` and is served as in `warn`.
+- **CRDs must be current.** Helm never upgrades `crds/`; apply them after upgrading the chart. On older CRDs the
+  `lastValid*` fields are pruned and `enforce` serves like `warn`.
+
+**Admission webhook.** The operator serves a validating webhook for `PipelineConfig` create and update, only when
+started with `--enable-webhooks` (so `make run` needs no certificates). It re-checks only when `spec.content` changed,
+so status and metadata updates of an existing invalid object are never blocked. The Helm chart enables it by default
+(`webhook.enabled: true`) with a self-signed certificate that Helm generates (`webhook.selfSigned`, reused on
+upgrade), so cert-manager is not required. To use cert-manager instead, set `webhook.certManager.enabled=true`
+(optionally with `webhook.certManager.issuerRef`).
+
+```bash
+# Syntax errors only produce a warning
+helm upgrade fleet ./charts/fleet-management --set manager.contentValidation=warn
+# No webhook at all (the reconciler still validates)
+helm upgrade fleet ./charts/fleet-management --set webhook.enabled=false
+# Turn the check off
+helm upgrade fleet ./charts/fleet-management --set manager.contentValidation=off --set webhook.enabled=false
+```
+
+`webhook.failurePolicy` defaults to `Fail`: while the manager is unavailable, creating a `PipelineConfig` or changing
+its content is refused, so invalid content cannot slip in. Updates that leave `spec.content` alone are not sent to the
+webhook, so finalizer and metadata updates keep working. Set `Ignore` to admit changes instead; `enforce` still keeps
+serving the last valid content then. The chart's own default `PipelineConfig` carries the label
+`fleet.pkarakal.com/skip-validation`, which makes the webhook skip it, because Helm creates it before the manager can
+answer.
+
 ---
 
 ### CollectorGroup
