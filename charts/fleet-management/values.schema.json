@@ -67,6 +67,11 @@
             }
           }
         },
+        "contentValidation": {
+          "type": "string",
+          "enum": ["off", "warn", "enforce"],
+          "description": "How PipelineConfig content is syntax-checked (--content-validation)."
+        },
         "args": {
           "type": "array",
           "items": { "type": "string" },
@@ -168,6 +173,58 @@
           "minimum": 1024,
           "maximum": 65535,
           "description": "Port the metrics server listens on."
+        }
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Install the PipelineConfig validating webhook."
+        },
+        "failurePolicy": {
+          "type": "string",
+          "enum": ["Fail", "Ignore"],
+          "description": "What the API server does when the webhook is unreachable."
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "description": "Webhook call timeout."
+        },
+        "selfSigned": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "validityDays": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Validity of the generated CA and certificate."
+            }
+          }
+        },
+        "certManager": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Issue the serving certificate with cert-manager."
+            },
+            "issuerRef": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "kind": { "type": "string" },
+                "group": { "type": "string" }
+              },
+              "description": "Existing issuer; a self-signed Issuer is created when name is empty."
+            }
+          }
         }
       }
     },

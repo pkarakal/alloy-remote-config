@@ -55,6 +55,18 @@ manager:
   ##
   imagePullSecrets: []
 
+  ## How PipelineConfig content is syntax-checked (--content-validation).
+  ## Syntax only: unknown components and bad references are reported by Alloy.
+  ##   off:     never parse content
+  ##   warn:    report errors in the ContentValid condition and as admission
+  ##            warnings, but serve the content anyway
+  ##   enforce: reject invalid content at admission and keep serving the last
+  ##            valid content when an invalid edit gets through
+  ## Enforce needs the current CRDs (kubectl apply -f crds/); on older CRDs it
+  ## serves like warn.
+  ##
+  contentValidation: enforce
+
   ## Pod-level security settings
   ##
   podSecurityContext:
@@ -129,6 +141,30 @@ metrics:
   enable: true
   # Metrics server port
   port: 8443
+
+## Validating webhook for PipelineConfig. It runs the same syntax check as
+## manager.contentValidation, so invalid content is refused (enforce) or
+## flagged (warn) when it is applied.
+##
+webhook:
+  enabled: true
+  ## Fail refuses PipelineConfig creates and content edits while the manager is
+  ## unavailable, so invalid content cannot slip in. Ignore admits them instead;
+  ## enforce still keeps serving the last valid content.
+  failurePolicy: Fail
+  timeoutSeconds: 10
+  ## Serving certificate. By default Helm generates a self-signed CA and
+  ## certificate at install time (reused on upgrade), so cert-manager is not
+  ## needed. Delete the Secret and upgrade to rotate it.
+  selfSigned:
+    validityDays: 3650
+  ## Use cert-manager instead; the CA bundle is injected into the webhook.
+  certManager:
+    enabled: false
+    ## Existing issuer to use. When name is empty a self-signed Issuer is created.
+    issuerRef: {}
+    # name: my-issuer
+    # kind: ClusterIssuer
 
 ## Cert-manager integration for TLS certificates.
 ## Required for webhook certificates and metrics endpoint certificates.

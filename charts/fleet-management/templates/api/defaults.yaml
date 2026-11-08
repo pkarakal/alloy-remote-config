@@ -20,6 +20,10 @@ metadata:
   labels:
     {{- include "fleet-management.labels" . | nindent 4 }}
     fleet.pkarakal.com/default-pipeline-config: "true"
+    {{- if .Values.webhook.enabled }}
+    {{- /* The manager is not up yet when Helm creates this, so the webhook must not be asked. */}}
+    fleet.pkarakal.com/skip-validation: "true"
+    {{- end }}
 spec:
   content: {{ .Values.defaults.pipelineConfig.content | quote }}
   {{- with .Values.defaults.pipelineConfig.description }}

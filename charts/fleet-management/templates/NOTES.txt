@@ -12,6 +12,9 @@ chart, apply the CRDs yourself:
 
   kubectl apply --server-side -f charts/fleet-management/crds/
 
+PipelineConfig content validation: {{ .Values.manager.contentValidation }}
+{{- if .Values.webhook.enabled }}, admission webhook on (failurePolicy {{ .Values.webhook.failurePolicy }}){{ end }}.
+
 {{- if .Values.service.enabled }}
 
 Connect-RPC API (alloy-remote-config endpoint)
