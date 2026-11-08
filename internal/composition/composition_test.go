@@ -113,6 +113,24 @@ var _ = DescribeTable("CheckSnippet",
 	Entry("remotecfg block", "remotecfg { }", "not allowed inside a declare"),
 )
 
+var _ = DescribeTable("CheckConfig",
+	func(content string, wantErr string) {
+		err := comp.CheckConfig(content)
+		if wantErr == "" {
+			Expect(err).NotTo(HaveOccurred())
+			return
+		}
+		Expect(err).To(MatchError(ContainSubstring(wantErr)))
+	},
+	Entry("valid component", "prometheus.remote_write \"x\" {\n  endpoint {\n    url = \"http://x\"\n  }\n}", ""),
+	Entry("logging block is fine at top level", "logging {\n  level = \"debug\"\n}", ""),
+	Entry("unknown component still parses", "no.such_component \"x\" { }", ""),
+	Entry("blank parses as an empty config", "  \n", ""),
+	Entry("unterminated block", "prometheus.remote_write \"x\" {", "content:"),
+	Entry("bad expression", "a = = 1", "expected expression"),
+	Entry("stray brace", "}", "content:"),
+)
+
 var _ = Describe("CheckDocument", func() {
 	It("reports a failure and flags the first sighting only", func() {
 		first, err := comp.CheckDocument("doc-bad", "broken {")

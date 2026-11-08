@@ -29,6 +29,7 @@ import (
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/resolution"
 	"github.com/pkarakal/alloy-remote-config/internal/selection"
+	"github.com/pkarakal/alloy-remote-config/internal/validate"
 )
 
 const (
@@ -60,6 +61,9 @@ type CollectorGroupBindingReconciler struct {
 	Metrics *metrics.ControllerMetrics
 	// Now is the clock for expiry; nil means time.Now.
 	Now func() time.Time
+	// ContentValidation is the mode the resolver serves PipelineConfigs in, so
+	// ConfigHash matches what collectors receive. The zero value means off.
+	ContentValidation validate.Mode
 }
 
 func (r *CollectorGroupBindingReconciler) now() time.Time {
@@ -134,7 +138,8 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 	// Step 5 — Update status
 	groupBinding.Status.BoundPipelineConfigRef = groupBinding.Spec.PipelineConfigRef
 	groupBinding.Status.BoundCollectorGroupRef = groupBinding.Spec.CollectorGroupRef
-	groupBinding.Status.ConfigHash = pipelineConfig.Status.ContentHash
+	_, servedHash, _ := validate.Served(pipelineConfig, r.ContentValidation)
+	groupBinding.Status.ConfigHash = servedHash
 	groupBinding.Status.Phase = derivePhase(groupBinding.Status.Conditions)
 	groupBinding.Status.ObservedGeneration = groupBinding.Generation
 	groupBinding.Status.EffectivePriority = resolution.EffectivePriority(groupBinding)
@@ -208,7 +213,11 @@ func (r *CollectorGroupBindingReconciler) setCompositionConditions(
 		Message:            "Content parses inside a declare block",
 		ObservedGeneration: b.Generation,
 	}
-	if err := composition.CheckSnippet(pc.Spec.Content); err != nil {
+	snippet, _, ok := validate.Served(pc, r.ContentValidation)
+	if !ok {
+		snippet = pc.Spec.Content
+	}
+	if err := composition.CheckSnippet(snippet); err != nil {
 		valid.Status = metav1.ConditionFalse
 		valid.Reason = "InvalidSyntax"
 		valid.Message = fleetv1alpha1.TruncateError(err.Error())

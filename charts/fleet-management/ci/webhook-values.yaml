@@ -1,0 +1,29 @@
+# CI test values: PipelineConfig webhook with the Helm-generated self-signed
+# certificate (no cert-manager needed), enforcing, and the chart's default
+# PipelineConfig created in the same install.
+
+manager:
+  image:
+    registry: ghcr.io
+    repository: pkarakal/alloy-remote-config
+    tag: latest
+    pullPolicy: Never
+  args: []
+  contentValidation: enforce
+
+webhook:
+  enabled: true
+  failurePolicy: Fail
+
+metrics:
+  enable: false
+
+defaults:
+  collectorGroup:
+    enabled: true
+  pipelineConfig:
+    enabled: true
+    content: |
+      prometheus.exporter.self "ci" { }
+  collectorGroupBinding:
+    enabled: true

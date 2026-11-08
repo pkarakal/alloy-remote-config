@@ -1,0 +1,25 @@
+# CI test values: no webhook, warn mode. This is the opt-out path for clusters
+# that cannot run an admission webhook.
+
+manager:
+  image:
+    registry: ghcr.io
+    repository: pkarakal/alloy-remote-config
+    tag: latest
+    pullPolicy: Never
+  args: []
+  contentValidation: warn
+
+webhook:
+  enabled: false
+
+metrics:
+  enable: false
+
+defaults:
+  collectorGroup:
+    enabled: false
+  pipelineConfig:
+    enabled: false
+  collectorGroupBinding:
+    enabled: false

@@ -98,7 +98,7 @@ var _ = Describe("Alloy remote config", func() {
 			Eventually(func(g Gomega) { loadedBefore = alloy.LoadedHashes(g) }).Should(Succeed())
 			Expect(loadedBefore).NotTo(BeEmpty())
 
-			// The operator does not validate syntax; Alloy rejects the unknown component.
+			// The syntax check passes (unknown components parse); Alloy rejects the component.
 			applyPipelineConfig(cfg, "no.such.component \"bad\" { }\n")
 
 			Eventually(func(g Gomega) {

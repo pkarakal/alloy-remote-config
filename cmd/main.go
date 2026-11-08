@@ -37,6 +37,8 @@ import (
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/server"
 	"github.com/pkarakal/alloy-remote-config/internal/service"
+	"github.com/pkarakal/alloy-remote-config/internal/validate"
+	webhookv1alpha1 "github.com/pkarakal/alloy-remote-config/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -63,6 +65,8 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
+	var contentValidationFlag string
+	var enableWebhooks bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	var trustedAttrs interceptor.TrustedAttributeFlag
@@ -74,6 +78,11 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
+	flag.StringVar(&contentValidationFlag, "content-validation", string(validate.ModeEnforce),
+		"How PipelineConfig content is syntax-checked: off, warn (check and report, still serve) or "+
+			"enforce (reject at admission and keep serving the last valid content).")
+	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
+		"Serve the PipelineConfig validating webhook. Needs a certificate, see --webhook-cert-path.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
@@ -99,6 +108,12 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	contentValidation, err := validate.ParseMode(contentValidationFlag)
+	if err != nil {
+		setupLog.Error(err, "Invalid flag", "flag", "content-validation")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -205,8 +220,9 @@ func main() {
 	}
 
 	if err := (&controller.PipelineConfigReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		ContentValidation: contentValidation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "PipelineConfig")
 		os.Exit(1)
@@ -229,13 +245,22 @@ func main() {
 		Scheme:       mgr.GetScheme(),
 		CollectorTTL: collectorTTL,
 		Metrics:      ctrlMetrics,
+
+		ContentValidation: contentValidation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "CollectorGroupBinding")
 		os.Exit(1)
 	}
+	if enableWebhooks {
+		if err := webhookv1alpha1.SetupPipelineConfigWebhookWithManager(mgr, contentValidation); err != nil {
+			setupLog.Error(err, "Failed to create webhook", "webhook", "PipelineConfig")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
-	baseResolver := kubernetesadapter.NewConfigResolver(mgr.GetClient())
+	baseResolver := kubernetesadapter.NewConfigResolver(mgr.GetClient(),
+		kubernetesadapter.WithContentValidation(contentValidation))
 	resolver := kubernetesadapter.NewMetricsConfigResolver(baseResolver, resMetrics)
 	registry := kubernetesadapter.NewKubernetesCollectorRegistry(mgr.GetClient(), mgr.GetAPIReader(), namespace,
 		kubernetesadapter.WithCollectorTTL(collectorTTL), kubernetesadapter.WithMetrics(rpcMetrics))
@@ -274,7 +299,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("Starting manager")
+	setupLog.Info("Starting manager", "contentValidation", contentValidation, "webhooks", enableWebhooks)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)

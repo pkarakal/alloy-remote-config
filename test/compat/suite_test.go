@@ -38,6 +38,7 @@ import (
 	"github.com/pkarakal/alloy-remote-config/internal/adapter/noop"
 	"github.com/pkarakal/alloy-remote-config/internal/controller"
 	"github.com/pkarakal/alloy-remote-config/internal/service"
+	"github.com/pkarakal/alloy-remote-config/internal/validate"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files from the currently served behavior")
@@ -107,9 +108,9 @@ func startHarness(crdDir string) *harness {
 	Expect(err).NotTo(HaveOccurred())
 
 	Expect(controller.SetupIndexes(ctx, h.mgr)).To(Succeed())
-	Expect((&controller.PipelineConfigReconciler{Client: h.mgr.GetClient(), Scheme: h.mgr.GetScheme()}).SetupWithManager(h.mgr)).To(Succeed())
+	Expect((&controller.PipelineConfigReconciler{Client: h.mgr.GetClient(), Scheme: h.mgr.GetScheme(), ContentValidation: validate.ModeEnforce}).SetupWithManager(h.mgr)).To(Succeed())
 	Expect((&controller.CollectorGroupReconciler{Client: h.mgr.GetClient(), Scheme: h.mgr.GetScheme()}).SetupWithManager(h.mgr)).To(Succeed())
-	Expect((&controller.CollectorGroupBindingReconciler{Client: h.mgr.GetClient(), Scheme: h.mgr.GetScheme()}).SetupWithManager(h.mgr)).To(Succeed())
+	Expect((&controller.CollectorGroupBindingReconciler{Client: h.mgr.GetClient(), Scheme: h.mgr.GetScheme(), ContentValidation: validate.ModeEnforce}).SetupWithManager(h.mgr)).To(Succeed())
 
 	var mgrCtx context.Context
 	mgrCtx, h.stopFn = context.WithCancel(ctx)
@@ -129,7 +130,7 @@ func (h *harness) stop() {
 // serviceFor returns the real CollectorService wired to the cache-backed resolver.
 func (h *harness) serviceFor(namespace string) *service.CollectorService {
 	return service.NewCollectorService(
-		kubernetes.NewConfigResolver(h.mgr.GetClient()),
+		kubernetes.NewConfigResolver(h.mgr.GetClient(), kubernetes.WithContentValidation(validate.ModeEnforce)),
 		&noop.CollectorRegistry{},
 		namespace,
 	)

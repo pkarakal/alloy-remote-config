@@ -51,4 +51,5 @@ spec:
   mode: Additive
   collectorGroupRef: cluster-c-1
   pipelineConfigRef: debug-logs
+  # Far in the future so the sample stays active. Set a nearer time to watch the expiry.
   expiresAt: "2030-01-01T00:00:00Z"

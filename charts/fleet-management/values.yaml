@@ -37,7 +37,14 @@ manager:
     tag: master
     pullPolicy: IfNotPresent
 
-  ## Arguments
+  ## Extra manager arguments, appended after the flags the chart sets itself
+  ## (--metrics-bind-address, --health-probe-bind-address, --collector-ttl,
+  ## --content-validation and, with the webhook, --enable-webhooks and --webhook-cert-path).
+  ## Setting this replaces the default list, so keep --leader-elect. Example:
+  ##   args:
+  ##     - --leader-elect
+  ##     - --trusted-attribute=tenant=X-Scope-OrgID
+  ##     - --zap-log-level=debug
   ##
   args:
     - --leader-elect
@@ -54,6 +61,19 @@ manager:
   ## Image pull secrets
   ##
   imagePullSecrets: []
+
+  ## How PipelineConfig content is syntax-checked (--content-validation).
+  ## Syntax only: unknown components and bad references are reported by Alloy.
+  ##   off:     never parse content
+  ##   warn:    report errors in the ContentValid condition and as admission
+  ##            warnings, but serve the content anyway
+  ##   enforce: reject invalid content at admission and keep serving the last
+  ##            valid content when an invalid edit gets through
+  ## Enforce needs the current CRDs. Helm never upgrades crds/, so after a chart
+  ## upgrade run: kubectl apply --server-side --force-conflicts -f charts/fleet-management/crds/
+  ## On older CRDs it serves like warn.
+  ##
+  contentValidation: enforce
 
   ## Pod-level security settings
   ##
@@ -122,16 +142,46 @@ rbacHelpers:
   # Install convenience admin/editor/viewer roles for CRDs
   enable: false
 
-## Controller metrics endpoint.
-## Enable to expose /metrics endpoint with RBAC protection.
+## Controller metrics endpoint (--metrics-bind-address).
+## Enable to expose /metrics over HTTPS with token authentication and RBAC
+## protection (the metrics-reader role). When disabled the manager gets
+## --metrics-bind-address=0 and serves no metrics.
 ##
 metrics:
   enable: true
   # Metrics server port
   port: 8443
 
-## Cert-manager integration for TLS certificates.
-## Required for webhook certificates and metrics endpoint certificates.
+## Validating webhook for PipelineConfig (--enable-webhooks). It runs the same
+## syntax check as manager.contentValidation, so invalid content is refused
+## (enforce) or flagged with a warning (warn) when it is applied. With
+## contentValidation: off it allows everything. Objects labeled
+## fleet.pkarakal.com/skip-validation bypass it; the reconciler still validates them.
+## Set enabled: false to run without a webhook (the reconciler still validates).
+##
+webhook:
+  enabled: true
+  ## Fail refuses PipelineConfig creates and content edits while the manager is
+  ## unavailable, so invalid content cannot slip in. Ignore admits them instead;
+  ## enforce still keeps serving the last valid content.
+  failurePolicy: Fail
+  timeoutSeconds: 10
+  ## Serving certificate. By default Helm generates a self-signed CA and
+  ## certificate at install time (reused on upgrade), so cert-manager is not
+  ## needed. Delete the Secret and upgrade to rotate it.
+  selfSigned:
+    validityDays: 3650
+  ## Use cert-manager instead; the CA bundle is injected into the webhook.
+  certManager:
+    enabled: false
+    ## Existing issuer to use. When name is empty a self-signed Issuer is created.
+    issuerRef: {}
+    # name: my-issuer
+    # kind: ClusterIssuer
+
+## Only used by the ServiceMonitor (prometheus.enable): when true it verifies the
+## metrics endpoint TLS with a metrics-server-cert Secret that you provide (the
+## chart does not create it) instead of skipping verification. The webhook certificate is configured by webhook.certManager.
 ##
 certManager:
   enable: false
@@ -228,7 +278,7 @@ gateway:
     ## Uses Envoy's native envoy.filters.http.jwt_authn filter.
     ##
     jwt:
-      ## JWT issuer — must match the "iss" claim in incoming tokens
+      ## JWT issuer, must match the "iss" claim in incoming tokens
       issuer: ""
       ## Allowed audiences (leave empty to skip audience validation)
       audiences: []
@@ -237,7 +287,7 @@ gateway:
       ## Explicit hostname for the JWKS upstream cluster.
       ## Required when jwksUri uses a non-standard port. Falls back to parsing jwksUri.
       jwksHost: ""
-      ## Inline JWKS JSON string — used when jwksUri is empty
+      ## Inline JWKS JSON string, used when jwksUri is empty
       localJwks: ""
       ## Forward the validated JWT payload to the upstream as this header
       forwardPayloadHeader: "x-jwt-payload"
@@ -247,7 +297,7 @@ gateway:
     ## Passwords must be in htpasswd format: {SHA}, $apr1$, or $2y$ (bcrypt, recommended).
     ## Generate with: htpasswd -nB username
     ##
-    ## Two mutually exclusive credential sources — secretName takes precedence when both are set.
+    ## Two mutually exclusive credential sources, secretName takes precedence when both are set.
     ##
     basic:
       realm: "alloy-remote-config"
@@ -356,7 +406,7 @@ gateway:
   ##
   logLevel: info
 
-  ## Envoy admin interface port (internal only — used by liveness/readiness probes, never exposed)
+  ## Envoy admin interface port (internal only, used by liveness/readiness probes, never exposed)
   ##
   adminPort: 9901
 
@@ -534,7 +584,7 @@ gateway:
             sni: {{ .Values.gateway.auth.jwt.jwksHost | default (.Values.gateway.auth.jwt.jwksUri | regexFind "://([^/:]+)" | trimPrefix "://") }}
       {{- end }}
 
-  ## Structured config overrides — deep-merged on top of the rendered gateway.config above.
+  ## Structured config overrides, deep-merged on top of the rendered gateway.config above.
   ## structuredConfig wins on conflicts. Useful for tweaking individual Envoy fields
   ## without replacing the entire config string.
   ##
@@ -557,17 +607,24 @@ collectorTTL: "5m"
 
 ## Default resources created on chart install.
 ## Provides a minimal working configuration out of the box.
-## Resources are labelled with well-known labels so the operator can discover
+## Resources are labeled with well-known labels so the operator can discover
 ## them by label rather than by name.
 ##
 defaults:
-  ## Default CollectorGroup — collectors with no explicit group fall through to this.
+  ## Default CollectorGroup. It only contains collectors whose remotecfg attribute
+  ## collector_group equals its name (there are no matchers). Collectors in no group
+  ## and with no tenant binding are served the default PipelineConfig below instead.
   collectorGroup:
     enabled: true
     name: "default"
     description: "Default collector group"
 
-  ## Default PipelineConfig — served to collectors in the default group.
+  ## Default PipelineConfig. It carries the label fleet.pkarakal.com/default-pipeline-config,
+  ## which makes it the fallback for collectors that no binding applies to. When
+  ## webhook.enabled it also carries fleet.pkarakal.com/skip-validation, because Helm
+  ## creates it before the manager can answer the admission webhook (the reconciler
+  ## still validates it). The content is loaded by remotecfg as a module: no logging,
+  ## tracing, http, remotecfg or livedebugging blocks.
   pipelineConfig:
     enabled: true
     name: "default"
