@@ -6,11 +6,13 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -45,6 +47,11 @@ var (
 func init() {
 	if v := os.Getenv("ALLOY_IMAGE"); v != "" {
 		alloyImage = v
+	}
+	// A distinct tag keeps concurrent runs on one Docker host from loading
+	// each other's builds into their Kind clusters.
+	if v := os.Getenv("E2E_MANAGER_IMAGE"); v != "" {
+		managerImage = v
 	}
 }
 
@@ -108,6 +115,54 @@ func installChart(extra ...string) {
 
 	out, err = kubectl("rollout", "status", "deployment/"+managerName, "-n", testNamespace, "--timeout=180s")
 	Expect(err).NotTo(HaveOccurred(), out)
+
+	waitForAPI()
+}
+
+// waitForAPI blocks until the Connect API answers through its Service, the
+// path Alloy uses. A finished rollout is not enough: kube-proxy can still route
+// to the replaced pod's IP, and Alloy's initial RegisterCollector has no
+// timeout, so it would hang on a black-holed connection for minutes.
+func waitForAPI() {
+	GinkgoHelper()
+	const pod = "api-probe"
+	_, _ = kubectl("delete", "pod", pod, "-n", testNamespace, "--ignore-not-found", "--wait=true")
+	url := fmt.Sprintf("http://%s.%s.svc.cluster.local:12345/collector.v1.CollectorService/GetConfig",
+		apiServiceName, testNamespace)
+	// Any HTTP response counts (trusted-attribute mode answers 401); only a
+	// connect failure or timeout resets the streak. Five in a row rules out a
+	// stale endpoint still in the Service's rotation.
+	script := fmt.Sprintf(`ok=0; for i in $(seq 1 90); do
+  if curl -sS --max-time 2 -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"id":"e2e-api-probe"}' %s; then ok=$((ok+1)); else ok=0; fi
+  [ "$ok" -ge 5 ] && exit 0; sleep 1; done; exit 1`, url)
+	overrides, err := json.Marshal(map[string]any{"spec": map[string]any{
+		"containers": []map[string]any{{
+			"name": "curl", "image": curlImage,
+			"command": []string{"/bin/sh", "-c"}, "args": []string{script},
+			"securityContext": map[string]any{
+				"readOnlyRootFilesystem": true, "allowPrivilegeEscalation": false,
+				"capabilities": map[string]any{"drop": []string{"ALL"}},
+				"runAsNonRoot": true, "runAsUser": 1000,
+				"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+			},
+		}},
+	}})
+	Expect(err).NotTo(HaveOccurred())
+	out, err := kubectl("run", pod, "--restart=Never", "-n", testNamespace,
+		"--image="+curlImage, "--overrides", string(overrides))
+	Expect(err).NotTo(HaveOccurred(), out)
+
+	Eventually(func(g Gomega) {
+		phase, err := kubectl("get", "pod", pod, "-n", testNamespace, "-o", "jsonpath={.status.phase}")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(phase).To(BeElementOf("Succeeded", "Failed"))
+	}, 3*time.Minute, time.Second).Should(Succeed())
+	phase, _ := kubectl("get", "pod", pod, "-n", testNamespace, "-o", "jsonpath={.status.phase}")
+	logs, _ := kubectl("logs", pod, "-n", testNamespace)
+	// Deleted inline: installChart also runs from DeferCleanup, where Ginkgo
+	// does not allow registering further cleanup.
+	_, _ = kubectl("delete", "pod", pod, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+	Expect(phase).To(Equal("Succeeded"), "Connect API did not answer through its Service:\n"+logs)
 }
 
 var _ = AfterSuite(func() {
