@@ -7,7 +7,9 @@ still get byte-identical config content and the same hash.
 ## What it does
 
 - Starts envtest with a real manager running all three reconcilers, so field
-  indexes, finalizers and `status.contentHash` are real.
+  indexes, finalizers and `status.contentHash` are real. The reconcilers and
+  the resolver run with `--content-validation=enforce` (the default), so the
+  goldens also prove that enforce serves the same content and hash as before.
 - Installs each directory under `fixtures/` into its own namespace and waits
   for reconciliation to settle.
 - For every scenario and every attribute set (`tenant` only, `collector_group`
@@ -23,16 +25,18 @@ creationTimestamp wins and the name breaks ties (envtest has 1s resolution, so
 the name decides here), which makes the answer deterministic.
 
 Other specs here: blank content is rejected on create, a blank object created
-under `crds-old/` survives the CRD upgrade and answers Unavailable, and the
+under `crds-old/` survives the CRD upgrade and answers Unavailable, the
 `Overlap` condition appears on the losing binding and clears when the winner is
-deleted.
+deleted, and `status.activeBindings` of `PipelineConfig` and `CollectorGroup` is
+recounted when a binding moves and blocks deletion while referenced
+(`counts_test.go`).
 
 ## Run
 
 `make test` includes this package. Directly:
 
 ```
-KUBEBUILDER_ASSETS="$(bin/setup-envtest use -p path --bin-dir bin)" go test ./test/compat/...
+KUBEBUILDER_ASSETS="$(bin/setup-envtest use -p path --bin-dir "$PWD/bin")" go test ./test/compat/...
 ```
 
 ## Regenerate goldens

@@ -17,4 +17,5 @@ spec:
   collectorGroupRef: canary-org-1234
   pipelineConfigRef: pipelineconfig-sample
   priority: 400
+  # Far in the future so the sample stays active. Set a nearer time to watch the expiry.
   expiresAt: "2030-01-01T00:00:00Z"

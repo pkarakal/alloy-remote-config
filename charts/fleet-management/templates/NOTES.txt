@@ -8,13 +8,20 @@ The controller and CRDs have been installed. Verify the installation:
   kubectl get customresourcedefinitions | grep pkarakal.com
 
 Upgrading: Helm installs the files in crds/ only on the first install and never upgrades them. After upgrading the
-chart, apply the CRDs yourself:
+chart, apply the CRDs yourself (--force-conflicts is needed because Helm owns .spec.versions of the CRDs it created):
 
-  kubectl apply --server-side -f charts/fleet-management/crds/
+  helm show crds <chart> --version {{ .Chart.Version }} | kubectl apply --server-side --force-conflicts -f -
+
+or, from a checkout of this chart version:
+
+  kubectl apply --server-side --force-conflicts -f charts/fleet-management/crds/
+
+Kubernetes 1.30 or newer is required (CRD validation ratcheting).
 
 PipelineConfig content validation: {{ .Values.manager.contentValidation }}
-{{- if .Values.webhook.enabled }}, admission webhook on (failurePolicy {{ .Values.webhook.failurePolicy }}){{ end }}.
-
+{{- if .Values.webhook.enabled }}, admission webhook on (failurePolicy {{ .Values.webhook.failurePolicy }}){{ else }}, admission webhook off{{ end }}.
+Only the syntax is checked. Run "alloy validate" in CI to catch unknown components and broken references.
+Change the mode with --set manager.contentValidation=warn|off, or drop the webhook with --set webhook.enabled=false.
 {{- if .Values.service.enabled }}
 
 Connect-RPC API (alloy-remote-config endpoint)
@@ -27,6 +34,27 @@ To test locally, forward the service port:
 
   kubectl port-forward svc/{{ include "fleet-management.resourceName" (dict "suffix" "api" "context" $) }} \
     {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+
+Point Alloy at it with a remotecfg block (identity attributes: tenant, collector_group, and any key your matchers use):
+
+  remotecfg {
+    url            = "http://{{ include "fleet-management.resourceName" (dict "suffix" "api" "context" $) }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+    id             = constants.hostname
+    poll_frequency = "1m"
+    attributes     = { "tenant" = "acme", "collector_group" = "{{ .Values.defaults.collectorGroup.name }}" }
+  }
+
+The default CollectorGroup only contains collectors that set collector_group to its name ("{{ .Values.defaults.collectorGroup.name }}"). Collectors in
+no group and with no tenant binding get the PipelineConfig labeled fleet.pkarakal.com/default-pipeline-config.
+
+{{- end }}
+{{- if .Values.gateway.enabled }}
+
+Envoy gateway ({{ .Values.gateway.auth.type }} authentication)
+-----------------------------------------------
+Collectors outside the cluster, or those that must authenticate, use the gateway Service instead:
+
+  {{ include "fleet-management.resourceName" (dict "suffix" "gateway" "context" $) }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.service.port }}
 
 {{- end }}
 {{- if .Values.ingress.enabled }}
