@@ -1,0 +1,92 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  name: default-config
+  labels:
+    fleet.pkarakal.com/default-pipeline-config: "true"
+spec:
+  content: |
+    otelcol.receiver.otlp "default" {
+      http {}
+      grpc {}
+
+      output {
+        metrics = [otelcol.exporter.otlphttp.default.input]
+        logs    = [otelcol.exporter.otlphttp.default.input]
+        traces  = [otelcol.exporter.otlphttp.default.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "default" {
+      client {
+        endpoint = sys.env("OTLP_ENDPOINT_DEFAULT")
+      }
+    }
+  description: Compat fixture default-config
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  name: prod-config
+spec:
+  content: |
+    otelcol.receiver.otlp "default" {
+      http {}
+      grpc {}
+
+      output {
+        metrics = [otelcol.exporter.otlphttp.prod.input]
+        logs    = [otelcol.exporter.otlphttp.prod.input]
+        traces  = [otelcol.exporter.otlphttp.prod.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "prod" {
+      client {
+        endpoint = sys.env("OTLP_ENDPOINT_PROD")
+      }
+    }
+  description: Compat fixture prod-config
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  name: acme-config
+spec:
+  content: |
+    otelcol.receiver.otlp "default" {
+      http {}
+      grpc {}
+
+      output {
+        metrics = [otelcol.exporter.otlphttp.acme.input]
+        logs    = [otelcol.exporter.otlphttp.acme.input]
+        traces  = [otelcol.exporter.otlphttp.acme.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "acme" {
+      client {
+        endpoint = sys.env("OTLP_ENDPOINT_ACME")
+      }
+    }
+  description: Compat fixture acme-config
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroupBinding
+metadata:
+  name: prod-binding
+spec:
+  collectorGroupRef: prod
+  pipelineConfigRef: prod-config
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroupBinding
+metadata:
+  name: acme-binding
+spec:
+  tenantRef: acme
+  pipelineConfigRef: acme-config

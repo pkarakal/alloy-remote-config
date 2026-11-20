@@ -8,12 +8,18 @@ import (
 	"time"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/resolution"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -30,12 +36,13 @@ type CollectorGroupReconciler struct {
 // +kubebuilder:rbac:groups=fleet.pkarakal.com,resources=collectorgroups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=fleet.pkarakal.com,resources=collectorgroups/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fleet.pkarakal.com,resources=collectorgroups/finalizers,verbs=update
+// +kubebuilder:rbac:groups=fleet.pkarakal.com,resources=collectorgroupbindings,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *CollectorGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.Info("Reconciling CollectorGroup")
+	log.V(1).Info("Reconciling CollectorGroup")
 
 	cg := &fleetv1alpha1.CollectorGroup{}
 	if err := r.Get(ctx, req.NamespacedName, cg); err != nil {
@@ -49,9 +56,13 @@ func (r *CollectorGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// handle deletion
 	if !cg.DeletionTimestamp.IsZero() {
-		if cg.Status.ActiveBindings > 0 {
+		active, err := r.countBindings(ctx, cg)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if active > 0 {
 			log.Info("CollectorGroup has active bindings, blocking deletion",
-				"activeBindings", cg.Status.ActiveBindings)
+				"activeBindings", active)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		controllerutil.RemoveFinalizer(cg, CollectorGroupFinalizer)
@@ -64,21 +75,75 @@ func (r *CollectorGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, r.Update(ctx, cg)
 	}
 
-	cg.Status.ObservedGeneration = cg.Generation
-	if err := r.Status().Update(ctx, cg); err != nil {
-		log.Error(err, "Failed to update CollectorGroup status")
+	orig := cg.DeepCopy()
+	active, err := r.countBindings(ctx, cg)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
+	cg.Status.ActiveBindings = active
+	setMatchersCondition(cg)
+	cg.Status.ObservedGeneration = cg.Generation
+	if !apiequality.Semantic.DeepEqual(orig.Status, cg.Status) {
+		if err := r.Status().Update(ctx, cg); err != nil {
+			log.Error(err, "Failed to update CollectorGroup status")
+			return ctrl.Result{}, err
+		}
+	}
 
-	log.Info("CollectorGroup reconciled successfully")
+	log.V(1).Info("CollectorGroup reconciled successfully")
 	return ctrl.Result{}, nil
+}
 
+// setMatchersCondition compiles spec.matchers and records MatchersValid. The
+// condition only exists while matchers are present, so groups that do not use
+// them see no status change.
+func setMatchersCondition(cg *fleetv1alpha1.CollectorGroup) {
+	if len(cg.Spec.Matchers) == 0 {
+		meta.RemoveStatusCondition(&cg.Status.Conditions, fleetv1alpha1.ConditionTypeMatchersValid)
+		return
+	}
+	cond := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeMatchersValid,
+		Status:             metav1.ConditionTrue,
+		Reason:             "MatchersCompiled",
+		Message:            "All matchers compiled",
+		ObservedGeneration: cg.Generation,
+	}
+	if _, err := resolution.ParseMatchers(cg.Spec.Matchers); err != nil {
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "InvalidMatcher"
+		cond.Message = err.Error() + "; only collector_group membership applies"
+	}
+	meta.SetStatusCondition(&cg.Status.Conditions, cond)
+}
+
+// countBindings derives the number of CollectorGroupBindings referencing cg
+// from the field index, so the count self-heals after any drift.
+func (r *CollectorGroupReconciler) countBindings(ctx context.Context, cg *fleetv1alpha1.CollectorGroup) (int, error) {
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list,
+		client.InNamespace(cg.Namespace),
+		client.MatchingFields{IndexCollectorGroupRef: cg.Name},
+	); err != nil {
+		return 0, err
+	}
+	return len(list.Items), nil
+}
+
+// enqueueForBinding maps a binding to the CollectorGroup it references.
+func (r *CollectorGroupReconciler) enqueueForBinding(_ context.Context, obj client.Object) []reconcile.Request {
+	b, ok := obj.(*fleetv1alpha1.CollectorGroupBinding)
+	if !ok || b.Spec.CollectorGroupRef == "" {
+		return nil
+	}
+	return []reconcile.Request{{Namespace: b.Namespace, Name: b.Spec.CollectorGroupRef}}
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CollectorGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fleetv1alpha1.CollectorGroup{}).
+		Watches(&fleetv1alpha1.CollectorGroupBinding{}, handler.EnqueueRequestsFromMapFunc(r.enqueueForBinding)).
 		Named("collectorgroup").
 		Complete(r)
 }

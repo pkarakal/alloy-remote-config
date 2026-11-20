@@ -6,27 +6,35 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/composition"
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
+	"github.com/pkarakal/alloy-remote-config/internal/resolution"
+	"github.com/pkarakal/alloy-remote-config/internal/selection"
+	"github.com/pkarakal/alloy-remote-config/internal/validate"
 )
 
 const (
 	// CollectorGroupBindingFinalizer is the finalizer added to CollectorGroupBinding
-	// resources to ensure proper cleanup of counters on deletion.
+	// resources to that existing objects carry; deletion only removes it.
 	CollectorGroupBindingFinalizer = "fleet.pkarakal.com/collectorgroupbinding-protection"
 
 	// IndexTenantRef is the field index key for spec.tenantRef.
@@ -51,6 +59,18 @@ type CollectorGroupBindingReconciler struct {
 	CollectorTTL time.Duration
 	// Metrics holds optional controller-level Prometheus metrics. May be nil.
 	Metrics *metrics.ControllerMetrics
+	// Now is the clock for expiry; nil means time.Now.
+	Now func() time.Time
+	// ContentValidation is the mode the resolver serves PipelineConfigs in, so
+	// ConfigHash matches what collectors receive. The zero value means off.
+	ContentValidation validate.Mode
+}
+
+func (r *CollectorGroupBindingReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // +kubebuilder:rbac:groups=fleet.pkarakal.com,resources=collectorgroupbindings,verbs=get;list;watch;create;update;patch;delete
@@ -65,7 +85,7 @@ type CollectorGroupBindingReconciler struct {
 // move the current state of the cluster closer to the desired state.
 func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.Info("Reconciling CollectorGroupBinding")
+	log.V(1).Info("Reconciling CollectorGroupBinding")
 
 	// Step 0 — Fetch
 	groupBinding := &fleetv1alpha1.CollectorGroupBinding{}
@@ -89,16 +109,21 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, r.Update(ctx, groupBinding)
 	}
 
+	// Snapshot before later steps mutate status, for Step 5 change detection.
+	originalStatus := groupBinding.Status.DeepCopy()
+
 	// Step 3 — Validate refs
 	pipelineConfig, err := r.validateRefs(ctx, groupBinding)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Step 4 — Idempotent counter management
-	if err := r.manageCounters(ctx, groupBinding); err != nil {
-		return ctrl.Result{}, err
-	}
+	// Step 3.5 — Flag bindings that lose to a duplicate target
+	r.setOverlapCondition(ctx, groupBinding)
+
+	// Step 3.6 — Expiry and additive composition conditions
+	r.setExpiredCondition(groupBinding)
+	r.setCompositionConditions(ctx, groupBinding, pipelineConfig)
 
 	// Step 4.5 — Evict stale registered tenants
 	if evicted := r.evictStaleTenants(groupBinding); evicted > 0 {
@@ -108,21 +133,201 @@ func (r *CollectorGroupBindingReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
+	r.deriveApplyStatus(groupBinding)
+
 	// Step 5 — Update status
 	groupBinding.Status.BoundPipelineConfigRef = groupBinding.Spec.PipelineConfigRef
 	groupBinding.Status.BoundCollectorGroupRef = groupBinding.Spec.CollectorGroupRef
-	groupBinding.Status.ConfigHash = pipelineConfig.Status.ContentHash
-	groupBinding.Status.LastSyncedAt = metav1.Now()
+	_, servedHash, _ := validate.Served(pipelineConfig, r.ContentValidation)
+	groupBinding.Status.ConfigHash = servedHash
 	groupBinding.Status.Phase = derivePhase(groupBinding.Status.Conditions)
 	groupBinding.Status.ObservedGeneration = groupBinding.Generation
+	groupBinding.Status.EffectivePriority = resolution.EffectivePriority(groupBinding)
 
-	if err := r.Status().Update(ctx, groupBinding); err != nil {
-		return ctrl.Result{}, err
+	// Skip no-op writes: each status write triggers another reconcile and the
+	// registry already writes this object on heartbeats. LastSyncedAt must not
+	// count as a change or the loop would never settle.
+	desired := groupBinding.Status.DeepCopy()
+	desired.LastSyncedAt = originalStatus.LastSyncedAt
+	if !equality.Semantic.DeepEqual(originalStatus, desired) {
+		groupBinding.Status.LastSyncedAt = metav1.Now()
+		if err := r.Status().Update(ctx, groupBinding); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
-	if r.CollectorTTL > 0 && len(groupBinding.Status.RegisteredTenants) > 0 {
-		return ctrl.Result{RequeueAfter: r.CollectorTTL / 2}, nil
+	return ctrl.Result{RequeueAfter: r.requeueAfter(groupBinding)}, nil
+}
+
+// requeueAfter returns the earlier of the eviction sweep and the expiry
+// moment, or zero when neither applies.
+func (r *CollectorGroupBindingReconciler) requeueAfter(b *fleetv1alpha1.CollectorGroupBinding) time.Duration {
+	var after time.Duration
+	if r.CollectorTTL > 0 && len(b.Status.RegisteredTenants) > 0 {
+		after = r.CollectorTTL / 2
 	}
-	return ctrl.Result{}, nil
+	if b.Spec.ExpiresAt != nil && !resolution.IsExpired(b, r.now()) {
+		untilExpiry := max(b.Spec.ExpiresAt.Sub(r.now()), time.Second)
+		if after == 0 || untilExpiry < after {
+			after = untilExpiry
+		}
+	}
+	return after
+}
+
+// setExpiredCondition reports whether spec.expiresAt has passed. Bindings
+// without an expiresAt carry no Expired condition.
+func (r *CollectorGroupBindingReconciler) setExpiredCondition(b *fleetv1alpha1.CollectorGroupBinding) {
+	if b.Spec.ExpiresAt == nil {
+		meta.RemoveStatusCondition(&b.Status.Conditions, fleetv1alpha1.ConditionTypeExpired)
+		return
+	}
+	cond := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeExpired,
+		Status:             metav1.ConditionFalse,
+		Reason:             "NotExpired",
+		Message:            "Binding expires at " + b.Spec.ExpiresAt.UTC().Format(time.RFC3339),
+		ObservedGeneration: b.Generation,
+	}
+	if resolution.IsExpired(b, r.now()) {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = "ExpiresAtPassed"
+		cond.Message = "Binding expired at " + b.Spec.ExpiresAt.UTC().Format(time.RFC3339) + " and is no longer a candidate"
+	}
+	meta.SetStatusCondition(&b.Status.Conditions, cond)
+}
+
+// setCompositionConditions sets CompositionValid and NameCollision on Additive
+// bindings and clears them on Replace bindings.
+func (r *CollectorGroupBindingReconciler) setCompositionConditions(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding, pc *fleetv1alpha1.PipelineConfig,
+) {
+	if !resolution.IsAdditive(b) {
+		meta.RemoveStatusCondition(&b.Status.Conditions, fleetv1alpha1.ConditionTypeCompositionValid)
+		meta.RemoveStatusCondition(&b.Status.Conditions, fleetv1alpha1.ConditionTypeNameCollision)
+		return
+	}
+	valid := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeCompositionValid,
+		Status:             metav1.ConditionTrue,
+		Reason:             "SyntaxValid",
+		Message:            "Content parses inside a declare block",
+		ObservedGeneration: b.Generation,
+	}
+	snippet, _, ok := validate.Served(pc, r.ContentValidation)
+	if !ok {
+		snippet = pc.Spec.Content
+	}
+	if err := composition.CheckSnippet(snippet); err != nil {
+		valid.Status = metav1.ConditionFalse
+		valid.Reason = "InvalidSyntax"
+		valid.Message = fleetv1alpha1.TruncateError(err.Error())
+	}
+	meta.SetStatusCondition(&b.Status.Conditions, valid)
+
+	collision := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeNameCollision,
+		Status:             metav1.ConditionFalse,
+		Reason:             "UniqueLabel",
+		Message:            "Declare label " + composition.Label(b.Name) + " is unique among additive bindings",
+		ObservedGeneration: b.Generation,
+	}
+	if winner, err := r.collidingBinding(ctx, b); err != nil {
+		logf.FromContext(ctx).Error(err, "Failed to list CollectorGroupBindings for collision check", "binding", b.Name)
+	} else if winner != "" {
+		collision.Status = metav1.ConditionTrue
+		collision.Reason = "DuplicateLabel"
+		collision.Message = fmt.Sprintf("Declare label %s is also derived from binding %q, which wins; this binding is dropped when both apply to a collector",
+			composition.Label(b.Name), winner)
+	}
+	meta.SetStatusCondition(&b.Status.Conditions, collision)
+}
+
+// collidingBinding returns the earlier-named live additive binding in the
+// namespace that derives the same label as b, or "". It cannot know which
+// collectors will see both, so it is a namespace-wide approximation.
+func (r *CollectorGroupBindingReconciler) collidingBinding(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
+) (string, error) {
+	if resolution.IsExpired(b, r.now()) {
+		return "", nil
+	}
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(b.Namespace)); err != nil {
+		return "", err
+	}
+	label := composition.Label(b.Name)
+	var winner string
+	for i := range list.Items {
+		o := &list.Items[i]
+		if o.Name == b.Name || !resolution.IsAdditive(o) || resolution.IsExpired(o, r.now()) || composition.Label(o.Name) != label {
+			continue
+		}
+		if o.Name < b.Name && (winner == "" || o.Name < winner) {
+			winner = o.Name
+		}
+	}
+	return winner, nil
+}
+
+// setOverlapCondition marks the binding as Overlap=True when another binding
+// with the same target wins selection, and Overlap=False otherwise. It only
+// edits the in-memory conditions; the caller's status write persists them.
+func (r *CollectorGroupBindingReconciler) setOverlapCondition(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
+) {
+	log := logf.FromContext(ctx)
+	if resolution.IsAdditive(b) || resolution.IsExpired(b, r.now()) {
+		meta.SetStatusCondition(&b.Status.Conditions, metav1.Condition{
+			Type:               fleetv1alpha1.ConditionTypeOverlap,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NotCompeting",
+			Message:            "Additive and expired bindings do not compete for the base config",
+			ObservedGeneration: b.Generation,
+		})
+		return
+	}
+	winner, err := r.winningBinding(ctx, b)
+	if err != nil {
+		log.Error(err, "Failed to list CollectorGroupBindings for overlap check", "binding", b.Name)
+		return
+	}
+	cond := metav1.Condition{
+		Type:               fleetv1alpha1.ConditionTypeOverlap,
+		Status:             metav1.ConditionFalse,
+		Reason:             "UniqueTarget",
+		Message:            "No other binding shares this target",
+		ObservedGeneration: b.Generation,
+	}
+	if winner != nil && winner.Name != b.Name {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = "DuplicateTarget"
+		cond.Message = fmt.Sprintf("Binding %q has the same target and priority, and wins the tie-break", winner.Name)
+	}
+	meta.SetStatusCondition(&b.Status.Conditions, cond)
+}
+
+// winningBinding returns the binding that resolution picks among all bindings
+// sharing b's target and effective priority, which is b itself when it is alone.
+func (r *CollectorGroupBindingReconciler) winningBinding(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
+) (*fleetv1alpha1.CollectorGroupBinding, error) {
+	indexKey, value := IndexCollectorGroupRef, b.Spec.CollectorGroupRef
+	if b.Spec.TenantRef != "" {
+		indexKey, value = IndexTenantRef, b.Spec.TenantRef
+	}
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(b.Namespace), client.MatchingFields{indexKey: value}); err != nil {
+		return nil, err
+	}
+	// The cache may not hold b yet, so make sure it competes.
+	if !slices.ContainsFunc(list.Items, func(o fleetv1alpha1.CollectorGroupBinding) bool { return o.Name == b.Name }) {
+		list.Items = append(list.Items, *b)
+	}
+	prio := resolution.EffectivePriority(b)
+	list.Items = slices.DeleteFunc(list.Items, func(o fleetv1alpha1.CollectorGroupBinding) bool {
+		return resolution.EffectivePriority(&o) != prio || resolution.IsAdditive(&o) || resolution.IsExpired(&o, r.now())
+	})
+	return selection.Pick(list.Items), nil
 }
 
 // evictStaleTenants removes RegisteredTenant entries whose LastSeenAt is older
@@ -143,27 +348,43 @@ func (r *CollectorGroupBindingReconciler) evictStaleTenants(b *fleetv1alpha1.Col
 	return before - len(b.Status.RegisteredTenants)
 }
 
-// handleDeletion decrements counters and strips the finalizer.
+// deriveApplyStatus recomputes the apply counts and last error from the
+// registered tenants. It runs after eviction so stale entries do not count.
+func (r *CollectorGroupBindingReconciler) deriveApplyStatus(b *fleetv1alpha1.CollectorGroupBinding) {
+	var applied, failed int32
+	var latest *fleetv1alpha1.RegisteredTenant
+	for i := range b.Status.RegisteredTenants {
+		t := &b.Status.RegisteredTenants[i]
+		switch t.ConfigStatus {
+		case fleetv1alpha1.ConfigStatusApplied:
+			applied++
+		case fleetv1alpha1.ConfigStatusFailed:
+			failed++
+			if latest == nil || changedAfter(t, latest) {
+				latest = t
+			}
+		}
+	}
+	b.Status.AppliedCount = applied
+	b.Status.FailedCount = failed
+	b.Status.LastApplyError = ""
+	if latest != nil {
+		b.Status.LastApplyError = fleetv1alpha1.TruncateError(latest.LastError)
+	}
+}
+
+// changedAfter reports whether a changed status strictly later than b did; a
+// missing timestamp sorts oldest.
+func changedAfter(a, b *fleetv1alpha1.RegisteredTenant) bool {
+	if a.StatusChangedAt == nil {
+		return false
+	}
+	return b.StatusChangedAt == nil || a.StatusChangedAt.After(b.StatusChangedAt.Time)
+}
+
+// handleDeletion strips the finalizer. Counts are derived by the target
+// reconcilers, so nothing needs to be unwound here.
 func (r *CollectorGroupBindingReconciler) handleDeletion(ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding) error {
-	log := logf.FromContext(ctx)
-	ns := b.Namespace
-
-	if prevPC := b.Status.BoundPipelineConfigRef; prevPC != "" {
-		if err := r.decrementPipelineConfigActiveBindings(ctx, ns, prevPC); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		} else if apierrors.IsNotFound(err) {
-			log.Info("PipelineConfig already deleted, skipping decrement", "name", prevPC)
-		}
-	}
-
-	if prevCG := b.Status.BoundCollectorGroupRef; prevCG != "" {
-		if err := r.decrementCollectorGroupActiveBindings(ctx, ns, prevCG); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		} else if apierrors.IsNotFound(err) {
-			log.Info("CollectorGroup already deleted, skipping decrement", "name", prevCG)
-		}
-	}
-
 	controllerutil.RemoveFinalizer(b, CollectorGroupBindingFinalizer)
 	return r.Update(ctx, b)
 }
@@ -226,43 +447,6 @@ func (r *CollectorGroupBindingReconciler) setRefsInvalid(
 	}
 }
 
-// manageCounters idempotently adjusts PipelineConfig and CollectorGroup
-// activeBindings counters when refs change between reconcile cycles.
-func (r *CollectorGroupBindingReconciler) manageCounters(
-	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
-) error {
-	log := logf.FromContext(ctx)
-	ns := b.Namespace
-	prevPC := b.Status.BoundPipelineConfigRef
-	newPC := b.Spec.PipelineConfigRef
-	prevCG := b.Status.BoundCollectorGroupRef
-	newCG := b.Spec.CollectorGroupRef
-
-	if prevPC != "" && prevPC != newPC {
-		if err := r.decrementPipelineConfigActiveBindings(ctx, ns, prevPC); err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "Failed to decrement old PipelineConfig active bindings", "name", prevPC)
-		}
-	}
-	if prevCG != "" && prevCG != newCG {
-		if err := r.decrementCollectorGroupActiveBindings(ctx, ns, prevCG); err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "Failed to decrement old CollectorGroup active bindings", "name", prevCG)
-		}
-	}
-
-	if prevPC != newPC {
-		if err := r.incrementPipelineConfigActiveBindings(ctx, ns, newPC); err != nil {
-			return err
-		}
-	}
-
-	if prevCG != newCG && newCG != "" {
-		if err := r.incrementCollectorGroupActiveBindings(ctx, ns, newCG); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // derivePhase returns Active, Degraded, or Pending based on the RefsValid condition.
 func derivePhase(conditions []metav1.Condition) fleetv1alpha1.CollectorGroupBindingPhase {
 	refsValid := meta.FindStatusCondition(conditions, fleetv1alpha1.ConditionTypeRefsValid)
@@ -291,50 +475,6 @@ func (r *CollectorGroupBindingReconciler) getCollectorGroup(ctx context.Context,
 	return collectorGroup, err
 }
 
-func (r *CollectorGroupBindingReconciler) decrementPipelineConfigActiveBindings(ctx context.Context, namespace, name string) error {
-	log := logf.FromContext(ctx)
-	log.Info("Decrementing PipelineConfig active bindings", "namespace", namespace, "name", name)
-	pipelineConfig, err := r.getPipelineConfig(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-	pipelineConfig.Status.ActiveBindings--
-	return r.Status().Update(ctx, pipelineConfig)
-}
-
-func (r *CollectorGroupBindingReconciler) incrementPipelineConfigActiveBindings(ctx context.Context, namespace, name string) error {
-	log := logf.FromContext(ctx)
-	log.Info("Incrementing PipelineConfig active bindings", "namespace", namespace, "name", name)
-	pipelineConfig, err := r.getPipelineConfig(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-	pipelineConfig.Status.ActiveBindings++
-	return r.Status().Update(ctx, pipelineConfig)
-}
-
-func (r *CollectorGroupBindingReconciler) decrementCollectorGroupActiveBindings(ctx context.Context, namespace, name string) error {
-	log := logf.FromContext(ctx)
-	log.Info("Decrementing CollectorGroup active bindings", "namespace", namespace, "name", name)
-	collectorGroup, err := r.getCollectorGroup(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-	collectorGroup.Status.ActiveBindings--
-	return r.Status().Update(ctx, collectorGroup)
-}
-
-func (r *CollectorGroupBindingReconciler) incrementCollectorGroupActiveBindings(ctx context.Context, namespace, name string) error {
-	log := logf.FromContext(ctx)
-	log.Info("Incrementing CollectorGroup active bindings", "namespace", namespace, "name", name)
-	collectorGroup, err := r.getCollectorGroup(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-	collectorGroup.Status.ActiveBindings++
-	return r.Status().Update(ctx, collectorGroup)
-}
-
 // enqueueBindingsForPipelineConfig maps a PipelineConfig change to reconcile
 // requests for all CollectorGroupBindings referencing it, using the field index.
 func (r *CollectorGroupBindingReconciler) enqueueBindingsForPipelineConfig(
@@ -350,17 +490,116 @@ func (r *CollectorGroupBindingReconciler) enqueueBindingsForPipelineConfig(
 	reqs := make([]reconcile.Request, len(list.Items))
 	for i, b := range list.Items {
 		reqs[i] = reconcile.Request{
-			NamespacedName: types.NamespacedName{Namespace: b.Namespace, Name: b.Name},
+			Namespace: b.Namespace, Name: b.Name,
 		}
 	}
 	return reqs
 }
 
+// enqueueBindingsSharingTarget maps a binding to every binding with the same
+// tenantRef or collectorGroupRef, so a loser reacts when the winner changes.
+func (r *CollectorGroupBindingReconciler) enqueueBindingsSharingTarget(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding,
+) []reconcile.Request {
+	var matches []client.ListOption
+	if b.Spec.TenantRef != "" {
+		matches = append(matches, client.MatchingFields{IndexTenantRef: b.Spec.TenantRef})
+	} else if b.Spec.CollectorGroupRef != "" {
+		matches = append(matches, client.MatchingFields{IndexCollectorGroupRef: b.Spec.CollectorGroupRef})
+	} else {
+		return nil
+	}
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list, append(matches, client.InNamespace(b.Namespace))...); err != nil {
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(list.Items))
+	for _, o := range list.Items {
+		if o.Name != b.Name {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&o)})
+		}
+	}
+	return append(reqs, r.enqueueLabelPeers(ctx, b, reqs)...)
+}
+
+// enqueueLabelPeers maps an additive binding to the other additive bindings
+// that derive the same declare label, since their NameCollision may change
+// even when their targets differ. skip lists requests already enqueued.
+func (r *CollectorGroupBindingReconciler) enqueueLabelPeers(
+	ctx context.Context, b *fleetv1alpha1.CollectorGroupBinding, skip []reconcile.Request,
+) []reconcile.Request {
+	if !resolution.IsAdditive(b) {
+		return nil
+	}
+	list := &fleetv1alpha1.CollectorGroupBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(b.Namespace)); err != nil {
+		return nil
+	}
+	label := composition.Label(b.Name)
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		o := &list.Items[i]
+		req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(o)}
+		if o.Name != b.Name && resolution.IsAdditive(o) && composition.Label(o.Name) == label && !slices.Contains(skip, req) {
+			reqs = append(reqs, req)
+		}
+	}
+	return reqs
+}
+
+// bindingTargetHandler fans out on create, delete and target changes only.
+// Reacting to status updates would make every binding re-trigger its peers.
+func (r *CollectorGroupBindingReconciler) bindingTargetHandler() handler.EventHandler {
+	enqueue := func(ctx context.Context, q workqueue.TypedRateLimitingInterface[reconcile.Request], obj client.Object) {
+		if b, ok := obj.(*fleetv1alpha1.CollectorGroupBinding); ok {
+			for _, req := range r.enqueueBindingsSharingTarget(ctx, b) {
+				q.Add(req)
+			}
+		}
+	}
+	return handler.Funcs{
+		CreateFunc: func(ctx context.Context, e event.TypedCreateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueue(ctx, q, e.Object)
+		},
+		DeleteFunc: func(ctx context.Context, e event.TypedDeleteEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueue(ctx, q, e.Object)
+		},
+		UpdateFunc: func(ctx context.Context, e event.TypedUpdateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			oldB, okOld := e.ObjectOld.(*fleetv1alpha1.CollectorGroupBinding)
+			newB, okNew := e.ObjectNew.(*fleetv1alpha1.CollectorGroupBinding)
+			if okOld && okNew && (oldB.Spec.TenantRef != newB.Spec.TenantRef ||
+				oldB.Spec.CollectorGroupRef != newB.Spec.CollectorGroupRef ||
+				resolution.EffectivePriority(oldB) != resolution.EffectivePriority(newB) ||
+				resolution.IsAdditive(oldB) != resolution.IsAdditive(newB) ||
+				!oldB.Spec.ExpiresAt.Equal(newB.Spec.ExpiresAt) ||
+				meta.IsStatusConditionTrue(oldB.Status.Conditions, fleetv1alpha1.ConditionTypeExpired) !=
+					meta.IsStatusConditionTrue(newB.Status.Conditions, fleetv1alpha1.ConditionTypeExpired)) {
+				enqueue(ctx, q, oldB)
+				enqueue(ctx, q, newB)
+			}
+		},
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&fleetv1alpha1.CollectorGroupBinding{}).
+		Watches(
+			&fleetv1alpha1.PipelineConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueBindingsForPipelineConfig),
+		).
+		Watches(&fleetv1alpha1.CollectorGroupBinding{}, r.bindingTargetHandler()).
+		Named("collectorgroupbinding").
+		Complete(r)
+}
+
+// SetupIndexes registers the CollectorGroupBinding field indexes. It must run
+// before any controller setup because several reconcilers list by these keys.
+func SetupIndexes(ctx context.Context, mgr ctrl.Manager) error {
 	indexer := mgr.GetFieldIndexer()
 
-	if err := indexer.IndexField(context.Background(),
+	if err := indexer.IndexField(ctx,
 		&fleetv1alpha1.CollectorGroupBinding{}, IndexTenantRef,
 		func(obj client.Object) []string {
 			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
@@ -373,7 +612,7 @@ func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 		return err
 	}
 
-	if err := indexer.IndexField(context.Background(),
+	if err := indexer.IndexField(ctx,
 		&fleetv1alpha1.CollectorGroupBinding{}, IndexCollectorGroupRef,
 		func(obj client.Object) []string {
 			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
@@ -386,7 +625,7 @@ func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 		return err
 	}
 
-	if err := indexer.IndexField(context.Background(),
+	if err := indexer.IndexField(ctx,
 		&fleetv1alpha1.CollectorGroupBinding{}, IndexPipelineConfigRef,
 		func(obj client.Object) []string {
 			b := obj.(*fleetv1alpha1.CollectorGroupBinding)
@@ -395,13 +634,5 @@ func (r *CollectorGroupBindingReconciler) SetupWithManager(mgr ctrl.Manager) err
 	); err != nil {
 		return err
 	}
-
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&fleetv1alpha1.CollectorGroupBinding{}).
-		Watches(
-			&fleetv1alpha1.PipelineConfig{},
-			handler.EnqueueRequestsFromMapFunc(r.enqueueBindingsForPipelineConfig),
-		).
-		Named("collectorgroupbinding").
-		Complete(r)
+	return nil
 }

@@ -18,8 +18,8 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 
 	// newRegistry creates a registry backed by the cache-aware mgrClient so
 	// field-index queries work, while Status patches go directly to the API server.
-	newRegistry := func() *CollectorRegistry {
-		return NewKubernetesCollectorRegistry(mgrClient, namespace)
+	newRegistry := func(opts ...RegistryOption) *CollectorRegistry {
+		return NewKubernetesCollectorRegistry(mgrClient, k8sClient, namespace, opts...)
 	}
 
 	makeInfo := func(id, tenant, collectorGroup string) port.CollectorInfo {
@@ -44,7 +44,7 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 
 	makeBinding := func(name, tenantRef, collectorGroupRef string) *fleetv1alpha1.CollectorGroupBinding {
 		b := &fleetv1alpha1.CollectorGroupBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Name: name, Namespace: namespace,
 			Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 				TenantRef:         tenantRef,
 				CollectorGroupRef: collectorGroupRef,
@@ -103,10 +103,23 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 		})
 
 		Context("when the tenant attribute is empty", func() {
-			It("returns an error", func() {
+			It("returns nil and writes nothing", func() {
+				const bindingName = "reg-no-tenant-binding"
+				makeBinding(bindingName, "", "no-tenant-group")
+				DeferCleanup(deleteBinding, bindingName)
+
 				reg := newRegistry()
-				info := port.CollectorInfo{ID: "collector-4", LocalAttributes: map[string]string{}}
-				Expect(reg.Register(ctx, info)).To(HaveOccurred())
+				info := port.CollectorInfo{
+					ID:              "collector-4",
+					LocalAttributes: map[string]string{"collector_group": "no-tenant-group"},
+				}
+				Expect(reg.Register(ctx, info)).To(Succeed())
+
+				Consistently(func(g Gomega) {
+					got := &fleetv1alpha1.CollectorGroupBinding{}
+					g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bindingName, Namespace: namespace}, got)).To(Succeed())
+					g.Expect(got.Status.RegisteredTenants).To(BeEmpty())
+				}, "1s", "250ms").Should(Succeed())
 			})
 		})
 
@@ -182,7 +195,7 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 				}).Should(Succeed())
 
 				// Unregister.
-				Expect(reg.Unregister(ctx, "collector-x")).To(Succeed())
+				Expect(reg.Unregister(ctx, "collector-x", port.UnregisterScope{})).To(Succeed())
 
 				// Verify removal.
 				b := &fleetv1alpha1.CollectorGroupBinding{}
@@ -191,10 +204,35 @@ var _ = Describe("KubernetesCollectorRegistry", func() {
 			})
 		})
 
+		Context("when a tenant scope is given", func() {
+			const bindingName = "unreg-scoped-binding"
+			AfterEach(func() { deleteBinding(bindingName) })
+
+			It("removes the entry only when the tenant matches", func() {
+				makeBinding(bindingName, "my-tenant", "")
+				reg := newRegistry()
+				Eventually(func(g Gomega) {
+					g.Expect(reg.Register(ctx, makeInfo("collector-s", "my-tenant", ""))).To(Succeed())
+					b := &fleetv1alpha1.CollectorGroupBinding{}
+					g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bindingName, Namespace: namespace}, b)).To(Succeed())
+					g.Expect(b.Status.RegisteredTenants).To(HaveLen(1))
+				}).Should(Succeed())
+
+				Expect(reg.Unregister(ctx, "collector-s", port.UnregisterScope{Tenant: "other-tenant"})).To(Succeed())
+				b := &fleetv1alpha1.CollectorGroupBinding{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bindingName, Namespace: namespace}, b)).To(Succeed())
+				Expect(b.Status.RegisteredTenants).To(HaveLen(1))
+
+				Expect(reg.Unregister(ctx, "collector-s", port.UnregisterScope{Tenant: "my-tenant"})).To(Succeed())
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bindingName, Namespace: namespace}, b)).To(Succeed())
+				Expect(b.Status.RegisteredTenants).To(BeEmpty())
+			})
+		})
+
 		Context("when the collector ID is not found in any binding", func() {
 			It("returns nil (idempotent)", func() {
 				reg := newRegistry()
-				Expect(reg.Unregister(ctx, "nonexistent-collector")).To(Succeed())
+				Expect(reg.Unregister(ctx, "nonexistent-collector", port.UnregisterScope{})).To(Succeed())
 			})
 		})
 	})

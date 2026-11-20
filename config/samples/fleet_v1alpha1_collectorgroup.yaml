@@ -1,6 +1,8 @@
 # Copyright 2026 Pavlos Karakalidis
 # SPDX-License-Identifier: MIT
 
+# Without matchers, collectors join this group by setting the remotecfg attribute
+# collector_group to the group name ("collectorgroup-sample").
 apiVersion: fleet.pkarakal.com/v1alpha1
 kind: CollectorGroup
 metadata:
@@ -9,5 +11,4 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: collectorgroup-sample
 spec:
-  description: |
-    This is a sample collector group
+  description: This is a sample collector group

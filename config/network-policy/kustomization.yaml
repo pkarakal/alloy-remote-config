@@ -2,4 +2,5 @@
 # SPDX-License-Identifier: MIT
 
 resources:
+- allow-webhook-traffic.yaml
 - allow-metrics-traffic.yaml

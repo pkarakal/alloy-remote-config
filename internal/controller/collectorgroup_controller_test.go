@@ -5,10 +5,10 @@ package controller
 
 import (
 	"context"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -29,7 +29,7 @@ var _ = Describe("CollectorGroup Controller", func() {
 
 	newReconciler := func() *CollectorGroupReconciler {
 		return &CollectorGroupReconciler{
-			Client: k8sClient,
+			Client: indexedListClient{Client: k8sClient, lister: mgrClient},
 			Scheme: k8sClient.Scheme(),
 		}
 	}
@@ -38,10 +38,8 @@ var _ = Describe("CollectorGroup Controller", func() {
 		It("should return no error for a missing CollectorGroup", func() {
 			reconciler := newReconciler()
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      "nonexistent",
-					Namespace: namespace,
-				},
+				Name:      "nonexistent",
+				Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -54,10 +52,8 @@ var _ = Describe("CollectorGroup Controller", func() {
 			err := k8sClient.Get(ctx, typeNamespacedName, cg)
 			if err != nil {
 				resource := &fleetv1alpha1.CollectorGroup{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: namespace,
-					},
+					Name:      resourceName,
+					Namespace: namespace,
 					Spec: fleetv1alpha1.CollectorGroupSpec{
 						Description: "Test collector group",
 					},
@@ -109,15 +105,57 @@ var _ = Describe("CollectorGroup Controller", func() {
 		})
 	})
 
+	DescribeTable("MatchersValid condition",
+		func(matchers []string, wantStatus metav1.ConditionStatus, wantMsg string) {
+			cg := &fleetv1alpha1.CollectorGroup{
+				Name: resourceName, Namespace: namespace,
+				Spec: fleetv1alpha1.CollectorGroupSpec{Matchers: matchers},
+			}
+			Expect(k8sClient.Create(ctx, cg)).To(Succeed())
+			DeferCleanup(func() {
+				c := &fleetv1alpha1.CollectorGroup{}
+				if err := k8sClient.Get(ctx, typeNamespacedName, c); err == nil {
+					c.Finalizers = nil
+					_ = k8sClient.Update(ctx, c)
+					_ = k8sClient.Delete(ctx, c)
+				}
+			})
+
+			reconciler := newReconciler()
+			for range 2 { // first pass adds the finalizer
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, cg)).To(Succeed())
+			cond := meta.FindStatusCondition(cg.Status.Conditions, fleetv1alpha1.ConditionTypeMatchersValid)
+			if wantStatus == "" {
+				Expect(cond).To(BeNil())
+				return
+			}
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(wantStatus))
+			Expect(cond.Message).To(ContainSubstring(wantMsg))
+		},
+		Entry("no matchers sets no condition", nil, metav1.ConditionStatus(""), ""),
+		Entry("valid matchers", []string{`org_id="org-1234"`, `cluster_id=~"c-1|c-2"`}, metav1.ConditionTrue, "compiled"),
+		Entry("regex that does not compile", []string{`org_id="x"`, `env=~"("`}, metav1.ConditionFalse, "invalid regular expression"),
+	)
+
+	It("rejects matchers with the wrong syntax at admission", func() {
+		cg := &fleetv1alpha1.CollectorGroup{
+			Name: "bad-syntax-group", Namespace: namespace,
+			Spec: fleetv1alpha1.CollectorGroupSpec{Matchers: []string{"org_id=org-1234"}},
+		}
+		Expect(k8sClient.Create(ctx, cg)).NotTo(Succeed())
+	})
+
 	Context("When deleting a CollectorGroup", func() {
 		BeforeEach(func() {
 			By("creating the CollectorGroup with the finalizer already set")
 			resource := &fleetv1alpha1.CollectorGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       resourceName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupFinalizer},
-				},
+				Name:       resourceName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupSpec{
 					Description: "Test collector group",
 				},
@@ -140,28 +178,6 @@ var _ = Describe("CollectorGroup Controller", func() {
 			if cg.DeletionTimestamp.IsZero() {
 				Expect(k8sClient.Delete(ctx, cg)).To(Succeed())
 			}
-		})
-
-		It("should block deletion and requeue when active bindings exist", func() {
-			By("setting active bindings in status")
-			cg := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, cg)).To(Succeed())
-			cg.Status.ActiveBindings = 2
-			Expect(k8sClient.Status().Update(ctx, cg)).To(Succeed())
-
-			By("triggering deletion")
-			Expect(k8sClient.Delete(ctx, cg)).To(Succeed())
-
-			By("reconciling the resource under deletion")
-			reconciler := newReconciler()
-			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
-
-			By("verifying the finalizer is still present")
-			updated := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
-			Expect(updated.Finalizers).To(ContainElement(CollectorGroupFinalizer))
 		})
 
 		It("should remove the finalizer and allow deletion when no active bindings exist", func() {

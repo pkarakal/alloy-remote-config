@@ -11,6 +11,7 @@ jobs:
   test-e2e:
     name: Run on Ubuntu
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Clone the code
         uses: actions/checkout@v4
@@ -28,6 +29,12 @@ jobs:
 
       - name: Verify kind installation
         run: kind version
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          # Pinned so the chart is tested against the same Helm every run.
+          version: v4.2.2
 
       - name: Running Test e2e
         run: |

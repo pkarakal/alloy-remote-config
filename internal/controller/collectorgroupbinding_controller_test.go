@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fleetv1alpha1 "github.com/pkarakal/alloy-remote-config/api/v1alpha1"
+	"github.com/pkarakal/alloy-remote-config/internal/selection"
 )
 
 var _ = Describe("CollectorGroupBinding Controller", func() {
@@ -34,7 +35,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 	bindingNN := types.NamespacedName{Name: bindingName, Namespace: namespace}
 	pcNN := types.NamespacedName{Name: pipelineConfigName, Namespace: namespace}
-	cgNN := types.NamespacedName{Name: collectorGroupName, Namespace: namespace}
 
 	newReconciler := func() *CollectorGroupBindingReconciler {
 		return &CollectorGroupBindingReconciler{
@@ -48,8 +48,8 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, pc)
 		if apierrors.IsNotFound(err) {
 			resource := &fleetv1alpha1.PipelineConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec:       fleetv1alpha1.PipelineConfigSpec{Content: configContent},
+				Name: name, Namespace: namespace,
+				Spec: fleetv1alpha1.PipelineConfigSpec{Content: configContent},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			resource.Status.ContentHash = configHash
@@ -62,8 +62,8 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cg)
 		if apierrors.IsNotFound(err) {
 			resource := &fleetv1alpha1.CollectorGroup{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec:       fleetv1alpha1.CollectorGroupSpec{},
+				Name: name, Namespace: namespace,
+				Spec: fleetv1alpha1.CollectorGroupSpec{},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		}
@@ -116,7 +116,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		It("should return no error for a missing CollectorGroupBinding", func() {
 			r := newReconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: "nonexistent", Namespace: namespace},
+				Name: "nonexistent", Namespace: namespace,
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -130,7 +130,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			err := k8sClient.Get(ctx, bindingNN, b)
 			if apierrors.IsNotFound(err) {
 				resource := &fleetv1alpha1.CollectorGroupBinding{
-					ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: namespace},
+					Name: bindingName, Namespace: namespace,
 					Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 						PipelineConfigRef: pipelineConfigName,
 						CollectorGroupRef: collectorGroupName,
@@ -158,11 +158,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createPipelineConfig(pipelineConfigName)
 			createCollectorGroup(collectorGroupName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -172,7 +170,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		})
 		AfterEach(cleanup)
 
-		It("should set Active phase, RefsValid=True, update counters and status", func() {
+		It("should set Active phase, RefsValid=True and status", func() {
 			r := newReconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
@@ -199,16 +197,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			By("checking ObservedGeneration")
 			Expect(b.Status.ObservedGeneration).To(Equal(b.Generation))
-
-			By("checking PipelineConfig activeBindings incremented")
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
-
-			By("checking CollectorGroup activeBindings incremented")
-			cg := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, cgNN, cg)).To(Succeed())
-			Expect(cg.Status.ActiveBindings).To(Equal(1))
 		})
 	})
 
@@ -217,11 +205,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createPipelineConfig(pipelineConfigName)
 			createCollectorGroup(collectorGroupName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -231,7 +217,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		})
 		AfterEach(cleanup)
 
-		It("should not double-increment counters on repeated reconcile", func() {
+		It("should keep status stable on repeated reconcile", func() {
 			r := newReconciler()
 
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
@@ -239,14 +225,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
-
-			cg := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, cgNN, cg)).To(Succeed())
-			Expect(cg.Status.ActiveBindings).To(Equal(1))
 		})
 	})
 
@@ -254,11 +232,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		BeforeEach(func() {
 			createPipelineConfig(pipelineConfigName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					TenantRef:         tenantID,
@@ -268,7 +244,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		})
 		AfterEach(cleanup)
 
-		It("should set Active phase with no CG counter managed", func() {
+		It("should set Active phase with no bound CollectorGroup", func() {
 			r := newReconciler()
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
@@ -282,22 +258,15 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			By("checking BoundCollectorGroupRef is empty (TenantRef does not manage a CG resource)")
 			Expect(b.Status.BoundCollectorGroupRef).To(BeEmpty())
-
-			By("checking PipelineConfig activeBindings incremented")
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
 		})
 	})
 
 	Context("When PipelineConfig is missing", func() {
 		BeforeEach(func() {
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: "nonexistent-pc",
 					CollectorGroupRef: collectorGroupName,
@@ -327,11 +296,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		BeforeEach(func() {
 			createPipelineConfig(pipelineConfigName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: "nonexistent-cg",
@@ -366,11 +333,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createCollectorGroup(collectorGroupName)
 
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -383,15 +348,11 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			deletePipelineConfig(newPCName)
 		})
 
-		It("should decrement old PC and increment new PC", func() {
+		It("should update the bound PipelineConfig ref", func() {
 			r := newReconciler()
 
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
 
 			b := &fleetv1alpha1.CollectorGroupBinding{}
 			Expect(k8sClient.Get(ctx, bindingNN, b)).To(Succeed())
@@ -400,15 +361,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			By("checking old PipelineConfig activeBindings decremented")
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(0))
-
-			By("checking new PipelineConfig activeBindings incremented")
-			newPC := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: newPCName, Namespace: namespace}, newPC)).To(Succeed())
-			Expect(newPC.Status.ActiveBindings).To(Equal(1))
 
 			By("checking BoundPipelineConfigRef updated")
 			Expect(k8sClient.Get(ctx, bindingNN, b)).To(Succeed())
@@ -421,11 +373,9 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createPipelineConfig(pipelineConfigName)
 			createCollectorGroup(collectorGroupName)
 			resource := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       bindingName,
-					Namespace:  namespace,
-					Finalizers: []string{CollectorGroupBindingFinalizer},
-				},
+				Name:       bindingName,
+				Namespace:  namespace,
+				Finalizers: []string{CollectorGroupBindingFinalizer},
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -439,15 +389,11 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			deleteCollectorGroup(collectorGroupName)
 		})
 
-		It("should decrement counters and remove finalizer", func() {
+		It("should remove the finalizer", func() {
 			r := newReconciler()
 
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			pc := &fleetv1alpha1.PipelineConfig{}
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(1))
 
 			b := &fleetv1alpha1.CollectorGroupBinding{}
 			Expect(k8sClient.Get(ctx, bindingNN, b)).To(Succeed())
@@ -455,15 +401,6 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: bindingNN})
 			Expect(err).NotTo(HaveOccurred())
-
-			By("checking PipelineConfig activeBindings decremented")
-			Expect(k8sClient.Get(ctx, pcNN, pc)).To(Succeed())
-			Expect(pc.Status.ActiveBindings).To(Equal(0))
-
-			By("checking CollectorGroup activeBindings decremented")
-			cg := &fleetv1alpha1.CollectorGroup{}
-			Expect(k8sClient.Get(ctx, cgNN, cg)).To(Succeed())
-			Expect(cg.Status.ActiveBindings).To(Equal(0))
 
 			By("checking finalizer removed")
 			updated := &fleetv1alpha1.CollectorGroupBinding{}
@@ -484,7 +421,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			createCollectorGroup(collectorGroupName)
 
 			b1 := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: namespace},
+				Name: bindingName, Namespace: namespace,
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: pipelineConfigName,
 					CollectorGroupRef: collectorGroupName,
@@ -493,7 +430,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			Expect(k8sClient.Create(ctx, b1)).To(Succeed())
 
 			b2 := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{Name: otherBindingName, Namespace: namespace},
+				Name: otherBindingName, Namespace: namespace,
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					PipelineConfigRef: otherPCName,
 					TenantRef:         tenantID,
@@ -540,7 +477,7 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 		BeforeEach(func() {
 			createPipelineConfig(ttlPCName)
 			b := &fleetv1alpha1.CollectorGroupBinding{
-				ObjectMeta: metav1.ObjectMeta{Name: ttlBindingName, Namespace: namespace},
+				Name: ttlBindingName, Namespace: namespace,
 				Spec: fleetv1alpha1.CollectorGroupBindingSpec{
 					TenantRef:         "ttl-tenant",
 					PipelineConfigRef: ttlPCName,
@@ -618,6 +555,70 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			Expect(b.Status.RegisteredTenants).To(HaveLen(1))
 		})
 
+		It("skips the status write when a reconcile changes nothing", func() {
+			seedTenant(metav1.Now())
+			r := &CollectorGroupBindingReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				CollectorTTL: time.Minute,
+			}
+			// The first reconcile settles status (phase, refs, hash).
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+			first := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, first)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+			second := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, second)).To(Succeed())
+
+			Expect(second.ResourceVersion).To(Equal(first.ResourceVersion))
+			Expect(second.Status.LastSyncedAt).To(Equal(first.Status.LastSyncedAt))
+		})
+
+		It("derives apply counts and the latest error, ignoring evicted entries", func() {
+			now := time.Now().Truncate(time.Second)
+			at := func(d time.Duration) *metav1.Time { t := metav1.NewTime(now.Add(d)); return &t }
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, b)).To(Succeed())
+			fresh := metav1.NewTime(now)
+			stale := metav1.NewTime(now.Add(-time.Hour))
+			b.Status.RegisteredTenants = []fleetv1alpha1.RegisteredTenant{
+				{ID: "a", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusApplied},
+				{ID: "b", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusApplied},
+				{ID: "c", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusFailed,
+					LastError: "old error", StatusChangedAt: at(-time.Minute)},
+				{ID: "d", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusFailed,
+					LastError: "new error", StatusChangedAt: at(-time.Second)},
+				{ID: "e", CollectorID: "c", LastSeenAt: fresh, ConfigStatus: fleetv1alpha1.ConfigStatusApplying},
+				{ID: "f", CollectorID: "c", LastSeenAt: stale, ConfigStatus: fleetv1alpha1.ConfigStatusFailed,
+					LastError: "evicted error", StatusChangedAt: at(time.Minute)},
+				{ID: "g", CollectorID: "c", LastSeenAt: stale, ConfigStatus: fleetv1alpha1.ConfigStatusApplied},
+			}
+			Expect(k8sClient.Status().Update(ctx, b)).To(Succeed())
+
+			r := &CollectorGroupBindingReconciler{
+				Client: k8sClient, Scheme: k8sClient.Scheme(), CollectorTTL: 5 * time.Minute,
+			}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			got := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, got)).To(Succeed())
+			Expect(got.Status.RegisteredTenants).To(HaveLen(5))
+			Expect(got.Status.AppliedCount).To(Equal(int32(2)))
+			Expect(got.Status.FailedCount).To(Equal(int32(2)))
+			Expect(got.Status.LastApplyError).To(Equal("new error"))
+
+			// A second reconcile with the new fields populated must not write.
+			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: ttlBindingNN})
+			Expect(err).NotTo(HaveOccurred())
+			again := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, ttlBindingNN, again)).To(Succeed())
+			Expect(again.ResourceVersion).To(Equal(got.ResourceVersion))
+		})
+
 		It("returns RequeueAfter=TTL/2 when live tenants exist", func() {
 			seedTenant(metav1.Now())
 
@@ -631,5 +632,202 @@ var _ = Describe("CollectorGroupBinding Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(ttl / 2))
 		})
+	})
+})
+
+var _ = Describe("CollectorGroupBinding Overlap condition", func() {
+	const namespace = "default"
+	ctx := context.Background()
+
+	keyOf := func(name string) types.NamespacedName {
+		return types.NamespacedName{Name: name, Namespace: namespace}
+	}
+
+	create := func(name string, spec fleetv1alpha1.CollectorGroupBindingSpec) {
+		spec.PipelineConfigRef = "overlap-pc"
+		Expect(k8sClient.Create(ctx, &fleetv1alpha1.CollectorGroupBinding{
+			Name: name, Namespace: namespace, Spec: spec,
+		})).To(Succeed())
+	}
+
+	remove := func(name string) {
+		b := &fleetv1alpha1.CollectorGroupBinding{}
+		if err := k8sClient.Get(ctx, keyOf(name), b); err != nil {
+			return
+		}
+		b.Finalizers = nil
+		_ = k8sClient.Update(ctx, b)
+		_ = k8sClient.Delete(ctx, b)
+	}
+
+	BeforeEach(func() {
+		pc := &fleetv1alpha1.PipelineConfig{
+			Name: "overlap-pc", Namespace: namespace,
+			Spec: fleetv1alpha1.PipelineConfigSpec{Content: "logging {}"},
+		}
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		pc.Status.ContentHash = "overlap-hash"
+		Expect(k8sClient.Status().Update(ctx, pc)).To(Succeed())
+		// Group bindings need their CollectorGroup to pass ref validation.
+		Expect(k8sClient.Create(ctx, &fleetv1alpha1.CollectorGroup{Name: "overlap-group", Namespace: namespace})).To(Succeed())
+	})
+
+	AfterEach(func() {
+		_ = k8sClient.Delete(ctx, &fleetv1alpha1.CollectorGroup{Name: "overlap-group", Namespace: namespace})
+		remove("overlap-a")
+		remove("overlap-b")
+		pc := &fleetv1alpha1.PipelineConfig{}
+		if err := k8sClient.Get(ctx, keyOf("overlap-pc"), pc); err == nil {
+			pc.Finalizers = nil
+			_ = k8sClient.Update(ctx, pc)
+			_ = k8sClient.Delete(ctx, pc)
+		}
+	})
+
+	// reconcileUntilDone retries because the cache-backed client can serve a
+	// stale object (conflict) and the first pass only adds the finalizer.
+	overlapOf := func(name string) *metav1.Condition {
+		b := &fleetv1alpha1.CollectorGroupBinding{}
+		Expect(k8sClient.Get(ctx, keyOf(name), b)).To(Succeed())
+		return meta.FindStatusCondition(b.Status.Conditions, fleetv1alpha1.ConditionTypeOverlap)
+	}
+
+	reconcileUntilDone := func(r *CollectorGroupBindingReconciler, name string) {
+		Eventually(func(g Gomega) {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: keyOf(name)})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(overlapOf(name)).NotTo(BeNil())
+		}).Should(Succeed())
+	}
+
+	DescribeTable("marks only the loser and clears when the winner goes away",
+		func(spec fleetv1alpha1.CollectorGroupBindingSpec) {
+			r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+
+			create("overlap-a", spec)
+			create("overlap-b", spec)
+			// Compute the winner from stored timestamps; creation may span a second.
+			a, b := &fleetv1alpha1.CollectorGroupBinding{}, &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, keyOf("overlap-a"), a)).To(Succeed())
+			Expect(k8sClient.Get(ctx, keyOf("overlap-b"), b)).To(Succeed())
+			winner, loser := "overlap-a", "overlap-b"
+			if selection.Older(b, a) {
+				winner, loser = loser, winner
+			}
+
+			By("waiting for the cache-backed client to see both bindings")
+			Eventually(func(g Gomega) {
+				got, err := r.winningBinding(ctx, a)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(got.Name).To(Equal(winner))
+				g.Expect(mgrClient.Get(ctx, keyOf(loser), &fleetv1alpha1.CollectorGroupBinding{})).To(Succeed())
+			}).Should(Succeed())
+
+			reconcileUntilDone(r, winner)
+			reconcileUntilDone(r, loser)
+
+			Expect(overlapOf(winner).Status).To(Equal(metav1.ConditionFalse))
+			cond := overlapOf(loser)
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("DuplicateTarget"))
+			Expect(cond.Message).To(ContainSubstring(winner))
+
+			By("deleting the winner and reconciling the loser again")
+			remove(winner)
+			Eventually(func() error {
+				return mgrClient.Get(ctx, keyOf(winner), &fleetv1alpha1.CollectorGroupBinding{})
+			}).Should(Satisfy(apierrors.IsNotFound))
+			Eventually(func(g Gomega) {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: keyOf(loser)})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(overlapOf(loser).Status).To(Equal(metav1.ConditionFalse))
+			}).Should(Succeed())
+		},
+		Entry("same tenantRef", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-tenant"}),
+		Entry("same collectorGroupRef", fleetv1alpha1.CollectorGroupBindingSpec{CollectorGroupRef: "overlap-group"}),
+	)
+
+	Context("with explicit priorities", func() {
+		prio := func(v int32) *int32 { return &v }
+		bindingOf := func(name string) *fleetv1alpha1.CollectorGroupBinding {
+			b := &fleetv1alpha1.CollectorGroupBinding{}
+			Expect(k8sClient.Get(ctx, keyOf(name), b)).To(Succeed())
+			return b
+		}
+		syncReconcile := func(r *CollectorGroupBindingReconciler, names ...string) {
+			Eventually(func(g Gomega) {
+				for _, n := range names {
+					g.Expect(mgrClient.Get(ctx, keyOf(n), &fleetv1alpha1.CollectorGroupBinding{})).To(Succeed())
+				}
+			}).Should(Succeed())
+			for _, n := range names {
+				reconcileUntilDone(r, n)
+			}
+		}
+
+		It("does not flag different priorities as an overlap and reports the effective priority", func() {
+			r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+			create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-prio", Priority: prio(300)})
+			create("overlap-b", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-prio"})
+			syncReconcile(r, "overlap-a", "overlap-b")
+
+			Expect(overlapOf("overlap-a").Status).To(Equal(metav1.ConditionFalse))
+			Expect(overlapOf("overlap-b").Status).To(Equal(metav1.ConditionFalse))
+			Expect(bindingOf("overlap-a").Status.EffectivePriority).To(Equal(int32(300)))
+			Expect(bindingOf("overlap-b").Status.EffectivePriority).To(Equal(int32(200)))
+		})
+
+		It("flags the loser when explicit priorities are equal", func() {
+			r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+			create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{CollectorGroupRef: "overlap-group", Priority: prio(300)})
+			create("overlap-b", fleetv1alpha1.CollectorGroupBindingSpec{CollectorGroupRef: "overlap-group", Priority: prio(300)})
+			a, b := bindingOf("overlap-a"), bindingOf("overlap-b")
+			winner, loser := "overlap-a", "overlap-b"
+			if selection.Older(b, a) {
+				winner, loser = loser, winner
+			}
+			syncReconcile(r, "overlap-a", "overlap-b")
+
+			Expect(overlapOf(winner).Status).To(Equal(metav1.ConditionFalse))
+			Expect(overlapOf(loser).Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("clears the overlap when a peer's priority changes", func() {
+			r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+			create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-flip"})
+			create("overlap-b", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-flip"})
+			a, b := bindingOf("overlap-a"), bindingOf("overlap-b")
+			loser := "overlap-b"
+			if selection.Older(b, a) {
+				loser = "overlap-a"
+			}
+			syncReconcile(r, "overlap-a", "overlap-b")
+			Expect(overlapOf(loser).Status).To(Equal(metav1.ConditionTrue))
+
+			By("ranking the loser explicitly higher")
+			Eventually(func(g Gomega) {
+				l := bindingOf(loser)
+				l.Spec.Priority = prio(500)
+				g.Expect(k8sClient.Update(ctx, l)).To(Succeed())
+			}).Should(Succeed())
+			Eventually(func(g Gomega) {
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: keyOf(loser)})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(overlapOf(loser).Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(bindingOf(loser).Status.EffectivePriority).To(Equal(int32(500)))
+			}).Should(Succeed())
+		})
+	})
+
+	It("fans out to the other bindings sharing a target", func() {
+		r := &CollectorGroupBindingReconciler{Client: mgrClient, Scheme: mgrClient.Scheme()}
+		create("overlap-a", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-fan"})
+		create("overlap-b", fleetv1alpha1.CollectorGroupBindingSpec{TenantRef: "overlap-fan"})
+		a := &fleetv1alpha1.CollectorGroupBinding{}
+		Expect(k8sClient.Get(ctx, keyOf("overlap-a"), a)).To(Succeed())
+
+		Eventually(func() []reconcile.Request {
+			return r.enqueueBindingsSharingTarget(ctx, a)
+		}).Should(ConsistOf(reconcile.Request{NamespacedName: keyOf("overlap-b")}))
 	})
 })

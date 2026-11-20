@@ -49,6 +49,11 @@ spec:
         {{- end }}
         - --health-probe-bind-address=:8081
         - --collector-ttl={{ .Values.collectorTTL }}
+        - --content-validation={{ .Values.manager.contentValidation }}
+        {{- if .Values.webhook.enabled }}
+        - --enable-webhooks
+        - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+        {{- end }}
         {{- range .Values.manager.args }}
         - {{ . }}
         {{- end }}
@@ -80,6 +85,11 @@ spec:
           name: metrics
           protocol: TCP
         {{- end }}
+        {{- if .Values.webhook.enabled }}
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        {{- end }}
         - containerPort: 8081
           name: health-probe
           protocol: TCP
@@ -101,7 +111,14 @@ spec:
           {{- else }}
           {}
           {{- end }}
+        {{- if .Values.webhook.enabled }}
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-certs
+          readOnly: true
+        {{- else }}
         volumeMounts: []
+        {{- end }}
       securityContext:
         {{- if .Values.manager.podSecurityContext }}
         {{- toYaml .Values.manager.podSecurityContext | nindent 8 }}
@@ -110,4 +127,11 @@ spec:
         {{- end }}
       serviceAccountName: {{ include "fleet-management.resourceName" (dict "suffix" "controller-manager" "context" $) }}
       terminationGracePeriodSeconds: 10
+      {{- if .Values.webhook.enabled }}
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: {{ include "fleet-management.resourceName" (dict "suffix" "webhook-server-cert" "context" $) }}
+      {{- else }}
       volumes: []
+      {{- end }}

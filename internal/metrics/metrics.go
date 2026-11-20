@@ -36,7 +36,27 @@ type RPCMetrics struct {
 	Served prometheus.Counter
 	// NotModified counts GetConfig calls where the collector's hash matched the current config.
 	NotModified prometheus.Counter
+	// RegistryErrors counts collector registry failures that were swallowed to keep
+	// the RPC successful, partitioned by operation (register, unregister, refresh).
+	RegistryErrors *prometheus.CounterVec
+	// RegistryTruncated counts registrations dropped because a binding reached the
+	// registeredTenants cap.
+	RegistryTruncated prometheus.Counter
+	// StatusReports counts GetConfig calls by the apply status the collector
+	// reported (applied, applying, failed, unknown).
+	StatusReports *prometheus.CounterVec
+	// TrustedAttrRejections counts requests whose trusted attribute header was
+	// missing, ambiguous or contradicted the client's attribute.
+	TrustedAttrRejections *prometheus.CounterVec
 }
+
+// rpcLabels are the label names shared by the RPC request counter and duration histogram.
+const labelCode = "code"
+
+// labelUnknown is the status label value for entries without a reported status.
+const labelUnknown = "unknown"
+
+var rpcLabels = []string{"procedure", labelCode}
 
 // NewRPCMetrics creates an initialised RPCMetrics instance ready to be registered.
 func NewRPCMetrics() *RPCMetrics {
@@ -47,7 +67,7 @@ func NewRPCMetrics() *RPCMetrics {
 				Name:      "rpc_requests_total",
 				Help:      "Total number of Connect-RPC requests, partitioned by procedure and response status code.",
 			},
-			[]string{"procedure", "code"},
+			rpcLabels,
 		),
 		Duration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -56,7 +76,7 @@ func NewRPCMetrics() *RPCMetrics {
 				Help:      "Histogram of Connect-RPC request duration in seconds, partitioned by procedure and response status code.",
 				Buckets:   rpcDurationBuckets,
 			},
-			[]string{"procedure", "code"},
+			rpcLabels,
 		),
 		Served: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -68,6 +88,35 @@ func NewRPCMetrics() *RPCMetrics {
 			Name:      "config_not_modified_total",
 			Help:      "Total number of GetConfig calls where the collector's hash matched the current configuration (304-equivalent).",
 		}),
+		RegistryErrors: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "registry_errors_total",
+				Help:      "Total number of collector registry errors that did not fail the RPC, partitioned by operation.",
+			},
+			[]string{"op"},
+		),
+		RegistryTruncated: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Name:      "registry_truncated_total",
+			Help:      "Total number of tenant registrations dropped because the binding reached the registeredTenants cap.",
+		}),
+		StatusReports: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "config_status_reports_total",
+				Help:      "Total number of GetConfig calls by reported collector apply status. Per replica; aggregate with sum.",
+			},
+			[]string{"status"},
+		),
+		TrustedAttrRejections: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "trusted_attribute_rejections_total",
+				Help:      "Total number of requests rejected or skipped by the trusted attribute check, by procedure and reason (missing, ambiguous, mismatch).",
+			},
+			[]string{"procedure", "reason"},
+		),
 	}
 }
 
@@ -77,7 +126,13 @@ type ResolutionMetrics struct {
 	Total *prometheus.CounterVec
 	// Duration measures resolution latency per path.
 	Duration *prometheus.HistogramVec
+	// AdditivePipelines observes how many additive pipelines were composed into
+	// each successfully resolved config.
+	AdditivePipelines prometheus.Histogram
 }
+
+// additivePipelineBuckets counts additives per response; most responses have none.
+var additivePipelineBuckets = []float64{0, 1, 2, 3, 5, 8}
 
 // NewResolutionMetrics creates an initialised ResolutionMetrics instance ready to be registered.
 func NewResolutionMetrics() *ResolutionMetrics {
@@ -99,6 +154,12 @@ func NewResolutionMetrics() *ResolutionMetrics {
 			},
 			[]string{"path", "outcome"},
 		),
+		AdditivePipelines: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Name:      "resolution_additive_pipelines",
+			Help:      "Number of additive pipelines composed into each resolved config.",
+			Buckets:   additivePipelineBuckets,
+		}),
 	}
 }
 
@@ -121,7 +182,7 @@ func NewHTTPMetrics() *HTTPMetrics {
 				Name:      "http_requests_total",
 				Help:      "Total number of HTTP requests received by the Connect-RPC server, partitioned by method and status code.",
 			},
-			[]string{"method", "code"},
+			[]string{"method", labelCode},
 		),
 		RequestDuration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -130,7 +191,7 @@ func NewHTTPMetrics() *HTTPMetrics {
 				Help:      "Histogram of HTTP request duration in seconds for the Connect-RPC server, partitioned by method and HTTP status code.",
 				Buckets:   rpcDurationBuckets,
 			},
-			[]string{"method", "code"},
+			[]string{"method", labelCode},
 		),
 	}
 }

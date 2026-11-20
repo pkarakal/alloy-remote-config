@@ -1,0 +1,29 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+
+# Canary cohort: collectors of org-1234 running on clusters c-1 or c-2 get a
+# dedicated config, outranking tenant bindings (200) through priority 300.
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroup
+metadata:
+  labels:
+    app.kubernetes.io/name: alloy-remote-config
+    app.kubernetes.io/managed-by: kustomize
+  name: canary-org-1234
+spec:
+  description: Canary cohort for org-1234 on clusters c-1 and c-2
+  matchers:
+    - org_id="org-1234"
+    - cluster_id=~"c-1|c-2"
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: CollectorGroupBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: alloy-remote-config
+    app.kubernetes.io/managed-by: kustomize
+  name: canary-org-1234
+spec:
+  collectorGroupRef: canary-org-1234
+  pipelineConfigRef: pipelineconfig-sample
+  priority: 300

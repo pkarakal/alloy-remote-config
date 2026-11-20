@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"connectrpc.com/connect"
 	collectorv1 "github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1"
@@ -61,17 +62,30 @@ func (s *CollectorService) GetConfig(
 		"collectorGroup", collectorGroup,
 	)
 
-	// Refresh the registration on every poll so LastSeenAt stays current.
-	// Alloy only calls RegisterCollector once on startup, not on each poll tick,
-	// so piggybacking here is the only way to keep TTL-based eviction accurate.
-	if err := s.refreshActiveTenants(ctx, msg.GetId(), "", msg.GetLocalAttributes()); err != nil {
+	// Alloy only sends a status when it changed since its last request, so a
+	// missing status means "no news" and must not overwrite the stored one.
+	var status port.ConfigStatus
+	if rcs := msg.GetRemoteConfigStatus(); rcs != nil {
+		status = configStatusFromProto(rcs.GetStatus())
+		s.countStatusReport(status)
+	}
+
+	// Heartbeat on every poll so LastSeenAt stays current for TTL eviction;
+	// Alloy only calls RegisterCollector once on startup. The registry throttles
+	// the actual writes.
+	if err := s.registry.Heartbeat(ctx, port.CollectorInfo{
+		ID:              msg.GetId(),
+		LocalAttributes: msg.GetLocalAttributes(),
+		ConfigStatus:    status,
+		ConfigError:     msg.GetRemoteConfigStatus().GetErrorMessage(),
+	}); err != nil {
+		s.countRegistryError("refresh")
 		log.V(1).Info("Could not refresh collector registration during GetConfig",
 			"collectorID", msg.GetId(), "err", err)
 	}
 
-	resolved, err := s.resolveConfig(ctx, tenant, collectorGroup)
+	resolved, err := s.resolveConfig(ctx, msg.GetLocalAttributes())
 	if err != nil {
-		log.Error(err, "Failed to resolve config")
 		return nil, err
 	}
 
@@ -93,29 +107,30 @@ func (s *CollectorService) GetConfig(
 	}), nil
 }
 
-// resolveConfig walks the fallback chain: tenant -> collector group -> default.
-func (s *CollectorService) resolveConfig(ctx context.Context, tenant, collectorGroup string) (*port.ResolvedConfig, error) {
-	if tenant != "" {
-		resolved, err := s.resolver.ResolveByTenant(ctx, s.namespace, tenant)
-		if err == nil {
-			return resolved, nil
-		}
-		if !errors.Is(err, port.ErrConfigNotFound) {
-			return nil, s.mapError(ctx, err)
-		}
+// configStatusFromProto maps the reported enum; UNSET and unknown values become Unknown.
+func configStatusFromProto(st collectorv1.RemoteConfigStatuses) port.ConfigStatus {
+	switch st {
+	case collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_APPLIED:
+		return port.ConfigStatusApplied
+	case collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_APPLYING:
+		return port.ConfigStatusApplying
+	case collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_FAILED:
+		return port.ConfigStatusFailed
+	default:
+		return port.ConfigStatusUnknown
 	}
+}
 
-	if collectorGroup != "" {
-		resolved, err := s.resolver.ResolveByCollectorGroup(ctx, s.namespace, collectorGroup)
-		if err == nil {
-			return resolved, nil
-		}
-		if !errors.Is(err, port.ErrConfigNotFound) {
-			return nil, s.mapError(ctx, err)
-		}
+// countStatusReport increments the status report counter when metrics are enabled.
+func (s *CollectorService) countStatusReport(status port.ConfigStatus) {
+	if s.rpcMetrics != nil && s.rpcMetrics.StatusReports != nil {
+		s.rpcMetrics.StatusReports.WithLabelValues(strings.ToLower(string(status))).Inc()
 	}
+}
 
-	resolved, err := s.resolver.ResolveDefault(ctx, s.namespace)
+// resolveConfig asks the resolver for the winning candidate for these attributes.
+func (s *CollectorService) resolveConfig(ctx context.Context, attrs map[string]string) (*port.ResolvedConfig, error) {
+	resolved, err := s.resolver.Resolve(ctx, s.namespace, attrs)
 	if err != nil {
 		return nil, s.mapError(ctx, err)
 	}
@@ -126,12 +141,15 @@ func (s *CollectorService) resolveConfig(ctx context.Context, tenant, collectorG
 func (s *CollectorService) mapError(ctx context.Context, err error) *connect.Error {
 	log := logf.FromContext(ctx)
 	switch {
+	// Expected states are polled constantly, so keep them out of the error log.
 	case errors.Is(err, port.ErrConfigNotFound):
+		log.V(1).Info("No config found", "reason", err.Error())
 		return connect.NewError(connect.CodeNotFound, err)
 	case errors.Is(err, port.ErrConfigNotReady):
+		log.V(1).Info("Config not ready", "reason", err.Error())
 		return connect.NewError(connect.CodeUnavailable, err)
 	default:
-		log.Error(err, "Internal error during config resolution")
+		log.Error(err, "Failed to resolve config")
 		return connect.NewError(connect.CodeInternal, err)
 	}
 }
@@ -142,23 +160,24 @@ func (s *CollectorService) RegisterCollector(
 ) (*connect.Response[collectorv1.RegisterCollectorResponse], error) {
 	log := logf.FromContext(ctx)
 	msg := req.Msg
-	if err := s.refreshActiveTenants(ctx, msg.GetId(), msg.GetName(), msg.GetLocalAttributes()); err != nil {
+	if err := s.registry.Register(ctx, port.CollectorInfo{
+		ID:              msg.GetId(),
+		Name:            msg.GetName(),
+		LocalAttributes: msg.GetLocalAttributes(),
+	}); err != nil {
+		// Alloy treats any RegisterCollector error as fatal for remotecfg, so
+		// never fail the RPC; GetConfig keeps refreshing the registration.
+		s.countRegistryError("register")
 		log.Error(err, "Failed to register collector", "id", msg.GetId())
-		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&collectorv1.RegisterCollectorResponse{}), nil
 }
 
-// refreshActiveTenants upserts the collector into the matching CollectorGroupBinding's
-// registeredTenants. It is called from both RegisterCollector (explicit registration,
-// errors are fatal) and GetConfig (implicit heartbeat, errors are non-fatal) because
-// Alloy only calls RegisterCollector once on startup, GetConfig is the only periodic call.
-func (s *CollectorService) refreshActiveTenants(ctx context.Context, id, name string, attrs map[string]string) error {
-	return s.registry.Register(ctx, port.CollectorInfo{
-		ID:              id,
-		Name:            name,
-		LocalAttributes: attrs,
-	})
+// countRegistryError increments the registry error counter when metrics are enabled.
+func (s *CollectorService) countRegistryError(op string) {
+	if s.rpcMetrics != nil {
+		s.rpcMetrics.RegistryErrors.WithLabelValues(op).Inc()
+	}
 }
 
 func (s *CollectorService) UnregisterCollector(
@@ -166,9 +185,10 @@ func (s *CollectorService) UnregisterCollector(
 	req *connect.Request[collectorv1.UnregisterCollectorRequest],
 ) (*connect.Response[collectorv1.UnregisterCollectorResponse], error) {
 	log := logf.FromContext(ctx)
-	if err := s.registry.Unregister(ctx, req.Msg.GetId()); err != nil {
+	if err := s.registry.Unregister(ctx, req.Msg.GetId(), port.UnregisterScopeFromContext(ctx)); err != nil {
+		// Best-effort for consistency with RegisterCollector; TTL eviction cleans up.
+		s.countRegistryError("unregister")
 		log.Error(err, "Failed to unregister collector", "id", req.Msg.GetId())
-		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&collectorv1.UnregisterCollectorResponse{}), nil
 }

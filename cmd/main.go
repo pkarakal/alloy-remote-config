@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"net/http"
@@ -36,6 +37,8 @@ import (
 	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/server"
 	"github.com/pkarakal/alloy-remote-config/internal/service"
+	"github.com/pkarakal/alloy-remote-config/internal/validate"
+	webhookv1alpha1 "github.com/pkarakal/alloy-remote-config/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -62,8 +65,11 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
+	var contentValidationFlag string
+	var enableWebhooks bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var trustedAttrs interceptor.TrustedAttributeFlag
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -72,6 +78,11 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
+	flag.StringVar(&contentValidationFlag, "content-validation", string(validate.ModeEnforce),
+		"How PipelineConfig content is syntax-checked: off, warn (check and report, still serve) or "+
+			"enforce (reject at admission and keep serving the last valid content).")
+	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
+		"Serve the PipelineConfig validating webhook. Needs a certificate, see --webhook-cert-path.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
@@ -87,6 +98,9 @@ func main() {
 		"The namespace to resolve pipeline configurations in.")
 	flag.DurationVar(&collectorTTL, "collector-ttl", 5*time.Minute,
 		"Duration after which a registered tenant entry is evicted if not refreshed. Set to 0 to disable.")
+	flag.Var(&trustedAttrs, "trusted-attribute",
+		"Repeatable <key>=<Header-Name>. Takes the local attribute <key> from a request header set by a trusted "+
+			"proxy instead of the client. The proxy must overwrite or strip client-supplied copies of the header.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -94,6 +108,12 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	contentValidation, err := validate.ParseMode(contentValidationFlag)
+	if err != nil {
+		setupLog.Error(err, "Invalid flag", "flag", "content-validation")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -186,6 +206,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := controller.SetupIndexes(context.Background(), mgr); err != nil {
+		setupLog.Error(err, "Failed to set up field indexes")
+		os.Exit(1)
+	}
+
 	if err := (&controller.CollectorGroupReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -195,8 +220,9 @@ func main() {
 	}
 
 	if err := (&controller.PipelineConfigReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		ContentValidation: contentValidation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "PipelineConfig")
 		os.Exit(1)
@@ -219,22 +245,37 @@ func main() {
 		Scheme:       mgr.GetScheme(),
 		CollectorTTL: collectorTTL,
 		Metrics:      ctrlMetrics,
+
+		ContentValidation: contentValidation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "CollectorGroupBinding")
 		os.Exit(1)
 	}
+	if enableWebhooks {
+		if err := webhookv1alpha1.SetupPipelineConfigWebhookWithManager(mgr, contentValidation); err != nil {
+			setupLog.Error(err, "Failed to create webhook", "webhook", "PipelineConfig")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
-	baseResolver := kubernetesadapter.NewConfigResolver(mgr.GetClient())
+	baseResolver := kubernetesadapter.NewConfigResolver(mgr.GetClient(),
+		kubernetesadapter.WithContentValidation(contentValidation))
 	resolver := kubernetesadapter.NewMetricsConfigResolver(baseResolver, resMetrics)
-	registry := kubernetesadapter.NewKubernetesCollectorRegistry(mgr.GetClient(), namespace)
+	registry := kubernetesadapter.NewKubernetesCollectorRegistry(mgr.GetClient(), mgr.GetAPIReader(), namespace,
+		kubernetesadapter.WithCollectorTTL(collectorTTL), kubernetesadapter.WithMetrics(rpcMetrics))
 	collectorSvc := service.NewCollectorService(resolver, registry, namespace, rpcMetrics)
 
 	mux := http.NewServeMux()
 	metricsInterceptor := interceptor.NewMetricsInterceptor(rpcMetrics)
+	interceptors := []connect.Interceptor{metricsInterceptor}
+	if len(trustedAttrs) > 0 {
+		setupLog.Info("Trusting attributes from request headers", "trustedAttributes", trustedAttrs.String())
+		interceptors = append(interceptors, interceptor.NewTrustedAttributesInterceptor(trustedAttrs, rpcMetrics))
+	}
 	mux.Handle(collectorv1connect.NewCollectorServiceHandler(
 		collectorSvc,
-		connect.WithInterceptors(metricsInterceptor),
+		connect.WithInterceptors(interceptors...),
 	))
 	reflector := grpcreflect.NewStaticReflector(collectorv1connect.CollectorServiceName)
 	mux.Handle(grpcreflect.NewHandlerV1(reflector))
@@ -258,7 +299,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("Starting manager")
+	setupLog.Info("Starting manager", "contentValidation", contentValidation, "webhooks", enableWebhooks)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)

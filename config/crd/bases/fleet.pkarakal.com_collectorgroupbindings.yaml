@@ -21,9 +21,24 @@ spec:
     - jsonPath: .spec.pipelineConfigRef
       name: Config
       type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.effectivePriority
+      name: Priority
+      type: integer
+    - jsonPath: .spec.expiresAt
+      name: Expires
+      type: string
     - jsonPath: .status.configHash
       name: Hash
       type: string
+    - jsonPath: .status.appliedCount
+      name: Applied
+      type: integer
+    - jsonPath: .status.failedCount
+      name: Failed
+      type: integer
     - jsonPath: .status.lastSyncedAt
       name: Synced
       type: date
@@ -63,11 +78,36 @@ spec:
                   their remotecfg attributes will receive the referenced config.
                   Mutually exclusive with TenantRef.
                 type: string
+              expiresAt:
+                description: |-
+                  ExpiresAt is the time after which the binding is no longer a candidate,
+                  in either mode. The object is never deleted automatically.
+                format: date-time
+                type: string
+              mode:
+                description: |-
+                  Mode says how the binding's PipelineConfig combines with others. Replace
+                  (the default when unset) competes for the base config by priority.
+                  Additive never competes: its content is appended to the base config as a
+                  self-contained declare block for every collector it targets.
+                enum:
+                - Replace
+                - Additive
+                type: string
               pipelineConfigRef:
                 description: |-
                   PipelineConfigRef is the name of the PipelineConfig to serve
                   to collectors matched by this binding.
                 type: string
+              priority:
+                description: |-
+                  Priority ranks this binding against others that match the same
+                  collector; the highest wins. When unset it defaults to 200 for tenant
+                  bindings and 100 for group bindings.
+                format: int32
+                maximum: 1000
+                minimum: 0
+                type: integer
               tenantRef:
                 description: |-
                   TenantRef is the tenant ID of a specific collector to target.
@@ -85,17 +125,23 @@ spec:
           status:
             description: status defines the observed state of CollectorGroupBinding
             properties:
+              appliedCount:
+                description: |-
+                  AppliedCount is the number of registered tenants whose last reported
+                  status is Applied. It counts tenants, not collector pods.
+                format: int32
+                type: integer
               boundCollectorGroupRef:
                 description: |-
                   BoundCollectorGroupRef tracks the CollectorGroupRef used in the last
-                  successful reconcile. Used to detect ref changes for idempotent
-                  activeBindings counter management.
+                  successful reconcile. Informational only; activeBindings is derived
+                  from the spec refs.
                 type: string
               boundPipelineConfigRef:
                 description: |-
                   BoundPipelineConfigRef tracks the PipelineConfigRef used in the last
-                  successful reconcile. Used to detect ref changes for idempotent
-                  activeBindings counter management.
+                  successful reconcile. Informational only; activeBindings is derived
+                  from the spec refs.
                 type: string
               conditions:
                 description: |-
@@ -166,6 +212,24 @@ spec:
                   field in GetConfigResponse — compare against remotecfg_* metrics
                   to verify collectors have picked up the latest config.
                 type: string
+              effectivePriority:
+                description: |-
+                  EffectivePriority is spec.priority, or the default for the binding kind
+                  (200 for tenant bindings, 100 for group bindings) when unset.
+                format: int32
+                type: integer
+              failedCount:
+                description: |-
+                  FailedCount is the number of registered tenants whose last reported
+                  status is Failed. It counts tenants, not collector pods.
+                format: int32
+                type: integer
+              lastApplyError:
+                description: |-
+                  LastApplyError is the error of the most recently changed Failed tenant,
+                  truncated to 1024 bytes.
+                maxLength: 1024
+                type: string
               lastSyncedAt:
                 description: |-
                   LastSyncedAt is the time at which the operator last successfully
@@ -202,13 +266,35 @@ spec:
                         Stored so that UnregisterCollector (which only carries the collector ID)
                         can find and remove this entry.
                       type: string
+                    configStatus:
+                      description: |-
+                        ConfigStatus is the apply status the collector last reported through
+                        GetConfig (Alloy v1.12 or newer). The entry reflects whichever collector
+                        instance wrote last for this tenant.
+                      enum:
+                      - Unknown
+                      - Applying
+                      - Applied
+                      - Failed
+                      type: string
                     id:
                       description: ID is the tenant ID from LocalAttributes["tenant"].
                       minLength: 1
                       type: string
+                    lastError:
+                      description: |-
+                        LastError is the error message from the last Failed report, truncated to
+                        1024 bytes. Empty when the collector is not failing.
+                      maxLength: 1024
+                      type: string
                     lastSeenAt:
                       description: LastSeenAt is the time the collector last called
                         RegisterCollector for this tenant.
+                      format: date-time
+                      type: string
+                    statusChangedAt:
+                      description: StatusChangedAt is the time configStatus or lastError
+                        last changed.
                       format: date-time
                       type: string
                   required:

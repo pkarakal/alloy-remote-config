@@ -1,0 +1,140 @@
+{{/*
+Validating webhook for PipelineConfig. It parses spec.content as Alloy syntax
+and follows manager.contentValidation: warn admits with a warning, enforce
+rejects. The serving certificate is either issued by cert-manager or, by
+default, generated here with genCA/genSignedCert.
+
+Secret and ValidatingWebhookConfiguration live in one file so the self-signed
+CA is generated once per render and both objects carry the same one.
+*/}}
+{{- if .Values.webhook.enabled }}
+{{- $name := include "fleet-management.resourceName" (dict "suffix" "webhook-service" "context" $) }}
+{{- $certName := include "fleet-management.resourceName" (dict "suffix" "webhook-server-cert" "context" $) }}
+{{- $ns := .Release.Namespace }}
+{{- $crt := "" }}
+{{- $key := "" }}
+{{- $ca := "" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fleet-management.labels" . | nindent 4 }}
+spec:
+  ports:
+  - name: webhook
+    port: 443
+    protocol: TCP
+    targetPort: webhook-server
+  selector:
+    {{- include "fleet-management.selectorLabels" . | nindent 4 }}
+---
+{{- if .Values.webhook.certManager.enabled }}
+{{- $issuerName := include "fleet-management.resourceName" (dict "suffix" "webhook-issuer" "context" $) }}
+{{- $issuerRef := .Values.webhook.certManager.issuerRef }}
+{{- if not $issuerRef.name }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $issuerName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fleet-management.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $certName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fleet-management.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+  - {{ $name }}.{{ $ns }}.svc
+  - {{ $name }}.{{ $ns }}.svc.cluster.local
+  issuerRef:
+    name: {{ $issuerRef.name | default $issuerName }}
+    kind: {{ $issuerRef.kind | default "Issuer" }}
+    group: {{ $issuerRef.group | default "cert-manager.io" }}
+  secretName: {{ $certName }}
+---
+{{- else }}
+{{- /* Reuse the Secret from the previous revision so upgrades do not rotate the CA. */}}
+{{- $existing := lookup "v1" "Secret" $ns $certName }}
+{{- if and $existing $existing.data (index $existing.data "ca.crt") (index $existing.data "tls.crt") (index $existing.data "tls.key") }}
+{{- $crt = index $existing.data "tls.crt" }}
+{{- $key = index $existing.data "tls.key" }}
+{{- $ca = index $existing.data "ca.crt" }}
+{{- else }}
+{{- $days := int .Values.webhook.selfSigned.validityDays }}
+{{- $genCA := genCA (printf "%s-ca" $name) $days }}
+{{- $genCert := genSignedCert (printf "%s.%s.svc" $name $ns) nil (list (printf "%s.%s.svc" $name $ns) (printf "%s.%s.svc.cluster.local" $name $ns)) $days $genCA }}
+{{- $crt = b64enc $genCert.Cert }}
+{{- $key = b64enc $genCert.Key }}
+{{- $ca = b64enc $genCA.Cert }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $certName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "fleet-management.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $crt }}
+  tls.key: {{ $key }}
+  ca.crt: {{ $ca }}
+---
+{{- end }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "fleet-management.resourceName" (dict "suffix" "validating-webhook" "context" $) }}
+  labels:
+    {{- include "fleet-management.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ $ns }}/{{ $certName }}
+  {{- end }}
+webhooks:
+- name: vpipelineconfig-v1alpha1.kb.io
+  admissionReviewVersions:
+  - v1
+  sideEffects: None
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+  clientConfig:
+    service:
+      name: {{ $name }}
+      namespace: {{ $ns }}
+      path: /validate-fleet-pkarakal-com-v1alpha1-pipelineconfig
+    {{- if not .Values.webhook.certManager.enabled }}
+    caBundle: {{ $ca }}
+    {{- end }}
+  rules:
+  - apiGroups:
+    - fleet.pkarakal.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - pipelineconfigs
+  # The chart's default PipelineConfig is created in the same install as the
+  # manager, which cannot answer yet, so it carries this label to skip the call.
+  objectSelector:
+    matchExpressions:
+    - key: fleet.pkarakal.com/skip-validation
+      operator: DoesNotExist
+  # Skip the call for updates that leave spec.content alone (status, finalizers,
+  # metadata), so they keep working while the manager is down.
+  matchConditions:
+  - name: content-changed
+    expression: request.operation == 'CREATE' || object.spec.content != oldObject.spec.content
+{{- end }}

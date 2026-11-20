@@ -1,0 +1,28 @@
+# Copyright 2026 Pavlos Karakalidis
+# SPDX-License-Identifier: MIT
+---
+apiVersion: fleet.pkarakal.com/v1alpha1
+kind: PipelineConfig
+metadata:
+  name: default-config
+  labels:
+    fleet.pkarakal.com/default-pipeline-config: "true"
+spec:
+  content: |
+    otelcol.receiver.otlp "default" {
+      http {}
+      grpc {}
+
+      output {
+        metrics = [otelcol.exporter.otlphttp.default.input]
+        logs    = [otelcol.exporter.otlphttp.default.input]
+        traces  = [otelcol.exporter.otlphttp.default.input]
+      }
+    }
+
+    otelcol.exporter.otlphttp "default" {
+      client {
+        endpoint = sys.env("OTLP_ENDPOINT_DEFAULT")
+      }
+    }
+  description: Compat fixture default-config

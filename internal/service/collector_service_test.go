@@ -12,7 +12,9 @@ import (
 	collectorv1 "github.com/grafana/alloy-remote-config/api/gen/proto/go/collector/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/pkarakal/alloy-remote-config/internal/metrics"
 	"github.com/pkarakal/alloy-remote-config/internal/port"
 )
 
@@ -25,29 +27,16 @@ type fakeResolver struct {
 	err              error
 }
 
-func (f *fakeResolver) ResolveByTenant(_ context.Context, _, tenant string) (*port.ResolvedConfig, error) {
+// Resolve emulates the real resolver's outcome: tenant, then group, then default.
+func (f *fakeResolver) Resolve(_ context.Context, _ string, attrs map[string]string) (*port.ResolvedConfig, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	if rc, ok := f.byTenant[tenant]; ok {
+	if rc, ok := f.byTenant[attrs["tenant"]]; ok && attrs["tenant"] != "" {
 		return rc, nil
 	}
-	return nil, port.ErrConfigNotFound
-}
-
-func (f *fakeResolver) ResolveByCollectorGroup(_ context.Context, _, group string) (*port.ResolvedConfig, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	if rc, ok := f.byCollectorGroup[group]; ok {
+	if rc, ok := f.byCollectorGroup[attrs["collector_group"]]; ok && attrs["collector_group"] != "" {
 		return rc, nil
-	}
-	return nil, port.ErrConfigNotFound
-}
-
-func (f *fakeResolver) ResolveDefault(_ context.Context, _ string) (*port.ResolvedConfig, error) {
-	if f.err != nil {
-		return nil, f.err
 	}
 	if f.defaultConfig != nil {
 		return f.defaultConfig, nil
@@ -57,14 +46,27 @@ func (f *fakeResolver) ResolveDefault(_ context.Context, _ string) (*port.Resolv
 
 type fakeRegistry struct {
 	registerErr   error
+	heartbeatErr  error
 	unregisterErr error
+	registers     int
+	heartbeats    int
+	lastHeartbeat port.CollectorInfo
+	lastScope     port.UnregisterScope
 }
 
 func (f *fakeRegistry) Register(_ context.Context, _ port.CollectorInfo) error {
+	f.registers++
 	return f.registerErr
 }
 
-func (f *fakeRegistry) Unregister(_ context.Context, _ string) error {
+func (f *fakeRegistry) Heartbeat(_ context.Context, info port.CollectorInfo) error {
+	f.heartbeats++
+	f.lastHeartbeat = info
+	return f.heartbeatErr
+}
+
+func (f *fakeRegistry) Unregister(_ context.Context, _ string, scope port.UnregisterScope) error {
+	f.lastScope = scope
 	return f.unregisterErr
 }
 
@@ -215,12 +217,85 @@ var _ = Describe("CollectorService", func() {
 				defaultConfig: &port.ResolvedConfig{Content: "default config", ContentHash: "hash"},
 			}
 			svc := NewCollectorService(resolver, &fakeRegistry{
-				registerErr: errors.New("registry unavailable"),
+				heartbeatErr: errors.New("registry unavailable"),
 			}, "default")
 
 			resp, err := svc.GetConfig(ctx, newGetConfigRequest("", nil))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.Msg.Content).To(Equal("default config"))
+		})
+
+		It("should heartbeat rather than register on each poll", func() {
+			resolver := &fakeResolver{
+				defaultConfig: &port.ResolvedConfig{Content: "c", ContentHash: "h"},
+			}
+			reg := &fakeRegistry{}
+			svc := NewCollectorService(resolver, reg, "default")
+
+			_, err := svc.GetConfig(ctx, newGetConfigRequest("", nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reg.heartbeats).To(Equal(1))
+			Expect(reg.registers).To(BeZero())
+		})
+	})
+
+	Context("GetConfig apply status", func() {
+		newReq := func(st *collectorv1.RemoteConfigStatus) *connect.Request[collectorv1.GetConfigRequest] {
+			return connect.NewRequest(&collectorv1.GetConfigRequest{Id: "c", RemoteConfigStatus: st})
+		}
+		resolver := func() *fakeResolver {
+			return &fakeResolver{defaultConfig: &port.ResolvedConfig{Content: "c", ContentHash: "h"}}
+		}
+
+		It("passes a FAILED status and error to Heartbeat", func() {
+			reg := &fakeRegistry{}
+			svc := NewCollectorService(resolver(), reg, "default")
+			_, err := svc.GetConfig(ctx, newReq(&collectorv1.RemoteConfigStatus{
+				Status:       collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_FAILED,
+				ErrorMessage: "syntax error",
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reg.lastHeartbeat.ConfigStatus).To(Equal(port.ConfigStatusFailed))
+			Expect(reg.lastHeartbeat.ConfigError).To(Equal("syntax error"))
+		})
+
+		DescribeTable("counts reports by status",
+			func(st *collectorv1.RemoteConfigStatus, label string) {
+				m := metrics.NewRPCMetrics()
+				svc := NewCollectorService(resolver(), &fakeRegistry{}, "default", m)
+				_, err := svc.GetConfig(ctx, newReq(st))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(testutil.ToFloat64(m.StatusReports.WithLabelValues(label))).To(Equal(1.0))
+			},
+			Entry("applied", &collectorv1.RemoteConfigStatus{Status: collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_APPLIED}, "applied"),
+			Entry("applying", &collectorv1.RemoteConfigStatus{Status: collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_APPLYING}, "applying"),
+			Entry("failed", &collectorv1.RemoteConfigStatus{Status: collectorv1.RemoteConfigStatuses_RemoteConfigStatuses_FAILED}, "failed"),
+			Entry("unset", &collectorv1.RemoteConfigStatus{}, "unknown"),
+		)
+
+		It("does not count a request without a status as a report", func() {
+			m := metrics.NewRPCMetrics()
+			svc := NewCollectorService(resolver(), &fakeRegistry{}, "default", m)
+			_, err := svc.GetConfig(ctx, newReq(nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(testutil.CollectAndCount(m.StatusReports)).To(BeZero())
+		})
+
+		// Alloy omits the status when it has not changed since the last request.
+		It("leaves the stored status alone when the request has no status", func() {
+			reg := &fakeRegistry{}
+			svc := NewCollectorService(resolver(), reg, "default")
+			_, err := svc.GetConfig(ctx, newReq(nil))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reg.lastHeartbeat.ConfigStatus).To(BeEmpty())
+		})
+
+		It("maps an explicit UNSET status to Unknown", func() {
+			reg := &fakeRegistry{}
+			svc := NewCollectorService(resolver(), reg, "default")
+			_, err := svc.GetConfig(ctx, newReq(&collectorv1.RemoteConfigStatus{}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reg.lastHeartbeat.ConfigStatus).To(Equal(port.ConfigStatusUnknown))
 		})
 	})
 
@@ -236,20 +311,43 @@ var _ = Describe("CollectorService", func() {
 			Expect(resp.Msg).NotTo(BeNil())
 		})
 
-		It("should return CodeInternal when the registry fails", func() {
+		It("should return OK and count the error when the registry fails", func() {
+			m := metrics.NewRPCMetrics()
 			svc := NewCollectorService(&fakeResolver{}, &fakeRegistry{
 				registerErr: errors.New("registry failure"),
-			}, "default")
+			}, "default", m)
 
-			_, err := svc.RegisterCollector(ctx, connect.NewRequest(&collectorv1.RegisterCollectorRequest{
+			resp, err := svc.RegisterCollector(ctx, connect.NewRequest(&collectorv1.RegisterCollectorRequest{
 				Id: "c1",
 			}))
-			Expect(err).To(HaveOccurred())
-			Expect(connectErrCode(err)).To(Equal(connect.CodeInternal))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg).NotTo(BeNil())
+			Expect(testutil.ToFloat64(m.RegistryErrors.WithLabelValues("register"))).To(Equal(1.0))
+		})
+
+		It("should return OK for a collector without a tenant attribute", func() {
+			svc := NewCollectorService(&fakeResolver{}, &fakeRegistry{}, "default")
+
+			resp, err := svc.RegisterCollector(ctx, connect.NewRequest(&collectorv1.RegisterCollectorRequest{
+				Id:              "c1",
+				LocalAttributes: map[string]string{"collector_group": "prod"},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg).NotTo(BeNil())
 		})
 	})
 
 	Context("UnregisterCollector", func() {
+		It("passes the scope from the context to the registry", func() {
+			reg := &fakeRegistry{}
+			svc := NewCollectorService(&fakeResolver{}, reg, "default")
+			scoped := port.WithUnregisterScope(ctx, port.UnregisterScope{Tenant: "acme"})
+
+			_, err := svc.UnregisterCollector(scoped, connect.NewRequest(&collectorv1.UnregisterCollectorRequest{Id: "c1"}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reg.lastScope).To(Equal(port.UnregisterScope{Tenant: "acme"}))
+		})
+
 		It("should succeed with a no-op registry", func() {
 			svc := NewCollectorService(&fakeResolver{}, &fakeRegistry{}, "default")
 
@@ -260,16 +358,18 @@ var _ = Describe("CollectorService", func() {
 			Expect(resp.Msg).NotTo(BeNil())
 		})
 
-		It("should return CodeInternal when the registry fails", func() {
+		It("should return OK and count the error when the registry fails", func() {
+			m := metrics.NewRPCMetrics()
 			svc := NewCollectorService(&fakeResolver{}, &fakeRegistry{
 				unregisterErr: errors.New("registry failure"),
-			}, "default")
+			}, "default", m)
 
-			_, err := svc.UnregisterCollector(ctx, connect.NewRequest(&collectorv1.UnregisterCollectorRequest{
+			resp, err := svc.UnregisterCollector(ctx, connect.NewRequest(&collectorv1.UnregisterCollectorRequest{
 				Id: "c1",
 			}))
-			Expect(err).To(HaveOccurred())
-			Expect(connectErrCode(err)).To(Equal(connect.CodeInternal))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg).NotTo(BeNil())
+			Expect(testutil.ToFloat64(m.RegistryErrors.WithLabelValues("unregister"))).To(Equal(1.0))
 		})
 	})
 })

@@ -4,6 +4,8 @@
 package v1alpha1
 
 import (
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -28,7 +30,38 @@ type CollectorGroupBindingSpec struct {
 	// to collectors matched by this binding.
 	// +required
 	PipelineConfigRef string `json:"pipelineConfigRef"`
+
+	// Priority ranks this binding against others that match the same
+	// collector; the highest wins. When unset it defaults to 200 for tenant
+	// bindings and 100 for group bindings.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000
+	Priority *int32 `json:"priority,omitempty"`
+
+	// Mode says how the binding's PipelineConfig combines with others. Replace
+	// (the default when unset) competes for the base config by priority.
+	// Additive never competes: its content is appended to the base config as a
+	// self-contained declare block for every collector it targets.
+	// +optional
+	Mode BindingMode `json:"mode,omitempty"`
+
+	// ExpiresAt is the time after which the binding is no longer a candidate,
+	// in either mode. The object is never deleted automatically.
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 }
+
+// BindingMode selects how a binding's config combines with others.
+// +kubebuilder:validation:Enum=Replace;Additive
+type BindingMode string
+
+const (
+	// BindingModeReplace makes the binding compete for the base config.
+	BindingModeReplace BindingMode = "Replace"
+	// BindingModeAdditive appends the binding's config to the base config.
+	BindingModeAdditive BindingMode = "Additive"
+)
 
 // RegisteredTenant records a tenant that has called RegisterCollector and has
 // been matched to this binding. Entries are evicted by the reconciler when
@@ -47,7 +80,43 @@ type RegisteredTenant struct {
 
 	// LastSeenAt is the time the collector last called RegisterCollector for this tenant.
 	LastSeenAt metav1.Time `json:"lastSeenAt"`
+
+	// ConfigStatus is the apply status the collector last reported through
+	// GetConfig (Alloy v1.12 or newer). The entry reflects whichever collector
+	// instance wrote last for this tenant.
+	// +optional
+	ConfigStatus ConfigStatus `json:"configStatus,omitempty"`
+
+	// LastError is the error message from the last Failed report, truncated to
+	// 1024 bytes. Empty when the collector is not failing.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	LastError string `json:"lastError,omitempty"`
+
+	// StatusChangedAt is the time configStatus or lastError last changed.
+	// +optional
+	StatusChangedAt *metav1.Time `json:"statusChangedAt,omitempty"`
 }
+
+// ConfigStatus is the apply status a collector reports for its remote config.
+// +kubebuilder:validation:Enum=Unknown;Applying;Applied;Failed
+type ConfigStatus string
+
+const (
+	// ConfigStatusUnknown means the collector reported no status (UNSET or an
+	// older Alloy that does not report one).
+	ConfigStatusUnknown ConfigStatus = "Unknown"
+	// ConfigStatusApplying means the collector is loading the config.
+	ConfigStatusApplying ConfigStatus = "Applying"
+	// ConfigStatusApplied means the collector loaded the config successfully.
+	ConfigStatusApplied ConfigStatus = "Applied"
+	// ConfigStatusFailed means the collector failed to fetch or load the config.
+	ConfigStatusFailed ConfigStatus = "Failed"
+)
+
+// MaxLastErrorBytes bounds RegisteredTenant.LastError and
+// CollectorGroupBindingStatus.LastApplyError.
+const MaxLastErrorBytes = 1024
 
 // CollectorGroupBindingStatus defines the observed state of CollectorGroupBinding.
 type CollectorGroupBindingStatus struct {
@@ -79,14 +148,19 @@ type CollectorGroupBindingStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// BoundPipelineConfigRef tracks the PipelineConfigRef used in the last
-	// successful reconcile. Used to detect ref changes for idempotent
-	// activeBindings counter management.
+	// successful reconcile. Informational only; activeBindings is derived
+	// from the spec refs.
 	BoundPipelineConfigRef string `json:"boundPipelineConfigRef,omitempty"`
 
 	// BoundCollectorGroupRef tracks the CollectorGroupRef used in the last
-	// successful reconcile. Used to detect ref changes for idempotent
-	// activeBindings counter management.
+	// successful reconcile. Informational only; activeBindings is derived
+	// from the spec refs.
 	BoundCollectorGroupRef string `json:"boundCollectorGroupRef,omitempty"`
+
+	// EffectivePriority is spec.priority, or the default for the binding kind
+	// (200 for tenant bindings, 100 for group bindings) when unset.
+	// +optional
+	EffectivePriority int32 `json:"effectivePriority,omitempty"`
 
 	// RegisteredTenants is the list of tenants currently registered against
 	// this binding. Entries are upserted on RegisterCollector and removed on
@@ -96,6 +170,22 @@ type CollectorGroupBindingStatus struct {
 	// +listType=map
 	// +listMapKey=id
 	RegisteredTenants []RegisteredTenant `json:"registeredTenants,omitempty"`
+
+	// AppliedCount is the number of registered tenants whose last reported
+	// status is Applied. It counts tenants, not collector pods.
+	// +optional
+	AppliedCount int32 `json:"appliedCount,omitempty"`
+
+	// FailedCount is the number of registered tenants whose last reported
+	// status is Failed. It counts tenants, not collector pods.
+	// +optional
+	FailedCount int32 `json:"failedCount,omitempty"`
+
+	// LastApplyError is the error of the most recently changed Failed tenant,
+	// truncated to 1024 bytes.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	LastApplyError string `json:"lastApplyError,omitempty"`
 }
 
 type CollectorGroupBindingPhase string
@@ -119,6 +209,27 @@ const (
 	// ConditionTypeRefsValid indicates both PipelineConfig and
 	// CollectorGroup/TenantRef resolve to existing resources.
 	ConditionTypeRefsValid = "RefsValid"
+
+	// ConditionTypeOverlap is True on a binding that loses to an older binding
+	// with the same tenantRef or collectorGroupRef and the same effective
+	// priority in the same namespace. Different priorities are an explicit
+	// ranking, not an overlap.
+	ConditionTypeOverlap = "Overlap"
+
+	// ConditionTypeExpired is True once spec.expiresAt has passed. Only set
+	// when the binding has an expiresAt.
+	ConditionTypeExpired = "Expired"
+
+	// ConditionTypeCompositionValid is set on Additive bindings. It is False,
+	// with the parse error, when the wrapped content is not valid Alloy syntax;
+	// such a binding is left out of composed configs.
+	ConditionTypeCompositionValid = "CompositionValid"
+
+	// ConditionTypeNameCollision is set on Additive bindings. It is True when
+	// another Additive binding that sorts earlier by name derives the same
+	// declare label; this binding is then dropped from any composition that
+	// contains both.
+	ConditionTypeNameCollision = "NameCollision"
 )
 
 // +kubebuilder:object:root=true
@@ -129,7 +240,12 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Config",type="string",JSONPath=".spec.pipelineConfigRef"
+// +kubebuilder:printcolumn:name="Mode",type="string",JSONPath=".spec.mode"
+// +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".status.effectivePriority"
+// +kubebuilder:printcolumn:name="Expires",type="string",JSONPath=".spec.expiresAt"
 // +kubebuilder:printcolumn:name="Hash",type="string",JSONPath=".status.configHash"
+// +kubebuilder:printcolumn:name="Applied",type="integer",JSONPath=".status.appliedCount"
+// +kubebuilder:printcolumn:name="Failed",type="integer",JSONPath=".status.failedCount"
 // +kubebuilder:printcolumn:name="Synced",type="date",JSONPath=".status.lastSyncedAt"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="(has(self.spec.collectorGroupRef) && self.spec.collectorGroupRef != \"\") != (has(self.spec.tenantRef) && self.spec.tenantRef != \"\")",message="exactly one of collectorGroupRef or tenantRef must be set"
@@ -160,4 +276,12 @@ type CollectorGroupBindingList struct {
 
 func init() {
 	SchemeBuilder.Register(&CollectorGroupBinding{}, &CollectorGroupBindingList{})
+}
+
+// TruncateError caps s at MaxLastErrorBytes without splitting a UTF-8 rune.
+func TruncateError(s string) string {
+	if len(s) <= MaxLastErrorBytes {
+		return s
+	}
+	return strings.ToValidUTF8(s[:MaxLastErrorBytes], "")
 }

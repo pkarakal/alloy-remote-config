@@ -9,18 +9,19 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: pipelineconfig-sample
 spec:
+  # OTLP_ENDPOINT must be set in the environment of the Alloy collectors.
   content: |
     otelcol.receiver.otlp "default" {
       http {}
       grpc {}
-    
+
       output {
         metrics = [otelcol.processor.batch.default.input]
         logs    = [otelcol.processor.batch.default.input]
         traces  = [otelcol.processor.batch.default.input]
       }
     }
-  
+
     otelcol.processor.batch "default" {
       output {
         metrics = [otelcol.exporter.otlphttp.default.input]
@@ -28,13 +29,13 @@ spec:
         traces  = [otelcol.exporter.otlphttp.default.input]
       }
     }
-    
+
     otelcol.exporter.otlphttp "default" {
       client {
-        endpoint = sys.env("<OTLP_ENDPOINT>")
+        endpoint = sys.env("OTLP_ENDPOINT")
       }
     }
   description: |
-    This is a sample pipeline that receivers OTLP telemetry,
+    This is a sample pipeline that receives OTLP telemetry,
     batches the samples and forwards them to an otlp http
     exporter.

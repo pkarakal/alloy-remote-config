@@ -1,0 +1,19 @@
+# Values for the fleet-management chart under test. The image reference is set
+# by the suite (--set) so it stays in sync with the image it builds and loads.
+
+# Short names keep the Service DNS name predictable: arc-api.<namespace>.svc.
+fullnameOverride: arc
+
+manager:
+  image:
+    pullPolicy: Never
+  # Single replica in a single-node Kind cluster, so no leader election.
+  args: []
+
+# Eviction is not under test; a long TTL keeps registered tenants stable.
+collectorTTL: "10m"
+
+defaults:
+  pipelineConfig:
+    content: |
+      prometheus.exporter.self "marker_default" { }
